@@ -117,9 +117,10 @@ def test_text_mode_pipeline(cfg, make_video):
     text = " ".join(s["text"] for s in segs).split()
     # 重叠区的词被两个窗口各识别了一次，去重后应当不多不少
     assert text == expected_words(20)
-    # 与音频的实际长度比较：不同 ffmpeg 版本生成的 AAC 会比 20 秒多出几毫秒的编码填充
+    # 与音频的实际长度比较：不同 ffmpeg 版本生成的 AAC 会比 20 秒多出几毫秒的编码填充。
+    # 时间按毫秒保存（四舍五入），所以允许 1 毫秒的误差
     duration = json.loads(job.path("vad.json").read_text())["duration"]
-    assert segs[0]["start"] >= 0 and segs[-1]["end"] <= duration + 1e-6
+    assert segs[0]["start"] >= 0 and segs[-1]["end"] <= duration + 1e-3
     data = json.loads(job.path("words.json").read_text())
     assert all(b["strategy"] == "text_overlap" for b in data["boundaries"])
 
