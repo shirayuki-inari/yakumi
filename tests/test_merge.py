@@ -31,6 +31,29 @@ def test_overlap_duplicates_removed():
     assert report.strategy == "lcs" and not report.risky
 
 
+def test_text_dedupe_requires_both_edges_and_a_complete_word():
+    for a, b in [
+        ("We say hello", "Fresh intro hello again"),
+        ("We say hello first", "hello again"),
+        ("We say hello", "helloworld again"),
+    ]:
+        assert dedupe_text(a, b) == (b, False)
+
+
+def test_text_merge_uses_only_adjacent_overlapping_windows():
+    a = AudioWindow(0, 0, 3.5, 0, 3, right="forced")
+    b = AudioWindow(1, 2.5, 6.5, 3, 6, left="forced", right="forced")
+    c = AudioWindow(2, 5.5, 9, 6, 9, left="forced")
+    blocks, reports = merge_text([(a, "We say hello"), (b, ""), (c, "hello again")])
+    assert [block.text for block in blocks] == ["We say hello", "hello again"]
+    assert all(r.risky for r in reports)
+
+    for start in (3.5, 3.45):
+        nearly_disjoint = AudioWindow(1, start, 6, start, 6, left="silence")
+        blocks, _ = merge_text([(a, "We say hello"), (nearly_disjoint, "hello again")])
+        assert len(blocks) == 2 and blocks[1].text == "hello again"
+
+
 def test_real_repetition_is_kept():
     # “no no no” 横跨切点；时间约束让每个 no 只和同一时刻的 no 匹配
     a = seq(("no", 119.0, 119.3), ("no", 119.5, 119.8), ("no", 120.0, 120.3))

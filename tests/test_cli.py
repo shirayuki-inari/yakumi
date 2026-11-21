@@ -43,6 +43,57 @@ def test_run_then_reuse_and_reexport(cli, sample_video, tmp_path):
     assert len(states) == 1 and states[0].format == "vtt"
 
 
+def test_cli_cache_compares_media_and_effective_stage_inputs(cli, make_video, tmp_path, monkeypatch):
+    conf = tmp_path / "yakumi.toml"
+    conf.write_text('[chunking]\nvad = "energy"\n[segment]\nmode = "rules"\n', encoding="utf-8")
+    video = make_video(5)
+    args = ("run", str(video), "-t", "zh", "--asr", "fake", "--translator", "fake")
+    cli("glossary", "set", "terms", "w0", "first")
+    first = cli(*args, "-g", "terms")
+    assert first.exit_code == 0, first.output
+    workspace = tmp_path / ".yakumi"
+    [initial] = Job.list(workspace)
+    assert initial.stage_inputs and initial.stats["asr_requests"] == 1
+
+    model = cli(*args, "--model", "updated")
+    assert model.exit_code == 0 and "从「翻译字幕」" in model.output
+    cli("glossary", "set", "terms", "w0", "updated")
+    terms = cli(*args, "--model", "updated")
+    assert terms.exit_code == 0 and "从「翻译字幕」" in terms.output
+    assert "updated" in Job.load(workspace, initial.id).path("glossary.json").read_text()
+    assert Job.list(workspace)[0].stats["asr_requests"] == 1
+
+    monkeypatch.setenv("YAKUMI_ASR_MODE", "text")
+    asr = cli(*args, "--model", "updated")
+    assert asr.exit_code == 0 and "从「语音识别」" in asr.output
+    subtitle = tmp_path / "sample.zh.srt"
+    assert "w9" in subtitle.read_text()
+    make_video(2)
+    replaced = cli(*args, "--model", "updated")
+    assert replaced.exit_code == 0 and "从「抽取音频」" in replaced.output
+    assert "w9" not in subtitle.read_text()
+
+    with Job.lock(workspace, initial.id):
+        busy = cli(*args, "--model", "updated")
+        assert busy.exit_code != 0 and "任务正在处理中" in busy.output
+
+
+def test_legacy_task_is_preserved_and_its_context_is_reused(cli, sample_video, tmp_path):
+    workspace = tmp_path / ".yakumi"
+    cli("glossary", "set", "terms", "w0", "hint")
+    old = Job.create(workspace, sample_video, "zh", glossaries=["terms"], notes="existing context")
+    old.subtitle_path.write_text("old subtitle", encoding="utf-8")
+    old.state.completed = ["extract", "vad", "transcribe", "merge", "repair", "segment", "translate", "write"]
+    old.save()
+
+    res = cli("run", str(sample_video), "-t", "zh", "--asr", "fake", "--translator", "fake")
+    assert res.exit_code == 0, res.output
+    latest, previous = Job.list(workspace)
+    assert latest.stage_inputs and latest.glossaries == ["terms"] and latest.notes == "existing context"
+    assert previous.id == old.state.id
+    assert old.subtitle_path.read_text(encoding="utf-8") == "old subtitle"
+
+
 def test_transcribe_only(cli, sample_video, tmp_path):
     res = cli("transcribe", str(sample_video), "--asr", "fake", "-o", str(tmp_path / "o"))
     assert res.exit_code == 0, res.output
@@ -148,3 +199,22 @@ def test_example_config_matches_defaults():
             if not isinstance(value, dict):
                 assert DEFAULTS[section][key] == value, f"{section}.{key}"
     assert data["translate"]["provider_routing"] == {} and data["translate"]["glossary"] == {}
+
+
+def test_runtime_only_settings_keep_finished_stages(cli, sample_video, tmp_path):
+    conf = tmp_path / "yakumi.toml"
+    base = '[chunking]\nvad = "energy"\n'
+    args = ("run", str(sample_video), "-t", "zh", "--asr", "fake", "--translator", "fake")
+    assert cli(*args).exit_code == 0
+    [job] = Job.list(tmp_path / ".yakumi")
+
+    conf.write_text(base + "[asr]\nthreads = 1\n[translate]\ntimeout = 999\n"
+                    "[segment]\ntimeout = 5\nconcurrency = 1\n", encoding="utf-8")
+    again = cli(*args)
+    assert again.exit_code == 0 and "重新处理" not in again.output
+    [same] = Job.list(tmp_path / ".yakumi")
+    assert same.id == job.id and same.stats == job.stats
+
+    # 会改变结果的设置仍然触发重做
+    conf.write_text(base + "[translate]\nconcurrency = 1\n", encoding="utf-8")
+    assert "从「翻译字幕」" in cli(*args).output

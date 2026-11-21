@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -43,6 +44,48 @@ def has_audio(path: str | Path) -> bool:
         [_bin("ffprobe"), "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", str(path)]
     )
     return bool(proc.stdout.strip())
+
+
+_PREVIEW_FORMATS = {
+    "mov": ("video/mp4", "audio/mp4"),
+    "matroska": ("video/x-matroska", "audio/x-matroska"),
+    "avi": ("video/x-msvideo", None),
+    "mpeg": ("video/mpeg", None),
+    "mpegts": ("video/mp2t", None),
+    "mp3": (None, "audio/mpeg"),
+    "wav": (None, "audio/wav"),
+    "flac": (None, "audio/flac"),
+    "ogg": ("video/ogg", "audio/ogg"),
+    "aac": (None, "audio/aac"),
+}
+
+
+def preview_mimetype(path: Path) -> str | None:
+    """只允许探测到的已知音视频容器内联播放。"""
+    st = path.stat()
+    return _probe_preview(path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+@lru_cache(maxsize=128)
+def _probe_preview(path: Path, *_identity: int) -> str | None:
+    try:
+        proc = subprocess.run(
+            [_bin("ffprobe"), "-v", "error", "-protocol_whitelist", "file",
+             "-format_whitelist", ",".join(_PREVIEW_FORMATS),
+             "-show_entries", "format=format_name:stream=codec_type:stream_disposition=attached_pic",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+        data = json.loads(proc.stdout)
+    except (MediaError, OSError, subprocess.SubprocessError, ValueError):
+        return None
+    container = data.get("format", {}).get("format_name", "").split(",")[0]
+    video_type, audio_type = _PREVIEW_FORMATS.get(container, (None, None))
+    stream_types = {s.get("codec_type") for s in data.get("streams", [])
+                    if not s.get("disposition", {}).get("attached_pic")}
+    if container == "matroska" and path.suffix.lower() == ".webm":
+        video_type, audio_type = "video/webm", "audio/webm"
+    return video_type if "video" in stream_types else audio_type if "audio" in stream_types else None
 
 
 CODECS = {

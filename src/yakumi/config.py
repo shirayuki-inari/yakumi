@@ -12,6 +12,7 @@ import os
 import tomllib
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from .files import config_dir
 
@@ -119,6 +120,31 @@ ENV_MAP = {
     "YAKUMI_WORKSPACE": ("workspace", "dir"),
 }
 
+SERVICE_KEYS = {
+    ("https", "openrouter.ai", 443): "OPENROUTER_API_KEY",
+    ("https", "api.openai.com", 443): "OPENAI_API_KEY",
+}
+
+
+def service_origin(url: str) -> tuple[str, str, int] | None:
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme in ("http", "https") and parsed.hostname and parsed.username is None:
+            port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+            return parsed.scheme, parsed.hostname, port
+    except ValueError:
+        pass
+    return None
+
+
+def is_openrouter(url: str) -> bool:
+    return service_origin(url) == ("https", "openrouter.ai", 443)
+
+
+def is_local_service(url: str) -> bool:
+    origin = service_origin(url)
+    return origin is not None and origin[1] in ("localhost", "127.0.0.1", "::1")
+
 
 def user_config_path() -> Path:
     return config_dir() / "config.toml"
@@ -131,6 +157,23 @@ def _deep_merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
         else:
             base[key] = value
     return base
+
+
+def _service_origins(cfg: dict[str, Any]) -> dict[str, tuple[str, str, int] | None]:
+    translate_url = cfg["translate"].get("base_url", "")
+    return {
+        "asr": service_origin(cfg["asr"].get("base_url", "")),
+        "translate": service_origin(translate_url),
+        "segment": service_origin(cfg["segment"].get("base_url") or translate_url),
+    }
+
+
+def _merge_config(cfg: dict[str, Any], layer: dict[str, Any]) -> None:
+    previous = _service_origins(cfg)
+    _deep_merge(cfg, layer)
+    for section, origin in _service_origins(cfg).items():
+        if origin != previous[section] and "api_key" not in layer.get(section, {}):
+            cfg[section].pop("api_key", None)
 
 
 # 这些配置项的值是自由的键值表，不检查里面的键名
@@ -189,18 +232,24 @@ def load_config(
         if warn:
             for key in unknown_keys(data):
                 warn(f"配置文件 {candidate} 里有不认识的配置项 {key}，已忽略（是否拼写有误？）")
-        _deep_merge(cfg, data)
+        _merge_config(cfg, data)
 
     if use_env:
+        env_config: dict[str, dict[str, str]] = {}
         for env, (section, key) in ENV_MAP.items():
             value = os.environ.get(env)
             if value:
-                cfg[section][key] = value
-        fallback = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
-        for section in ("asr", "translate"):
-            if not cfg[section].get("api_key") and fallback:
-                cfg[section]["api_key"] = fallback
+                env_config.setdefault(section, {})[key] = value
+        _merge_config(cfg, env_config)
 
+    override_config = {}
     if overrides:
-        _deep_merge(cfg, {k: {kk: vv for kk, vv in v.items() if vv is not None} for k, v in overrides.items()})
+        override_config = {k: {kk: vv for kk, vv in v.items() if vv is not None} for k, v in overrides.items()}
+        _merge_config(cfg, override_config)
+    if use_env:
+        for section in ("asr", "translate"):
+            origin = service_origin(cfg[section]["base_url"])
+            env = SERVICE_KEYS.get(origin) if origin is not None else None
+            if env and not cfg[section].get("api_key") and "api_key" not in override_config.get(section, {}):
+                cfg[section]["api_key"] = os.environ.get(env, "")
     return cfg

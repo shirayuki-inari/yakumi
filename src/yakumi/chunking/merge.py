@@ -16,16 +16,15 @@
   - 片段边缘 edge_margin 秒内（A 片段末尾、B 片段开头）另一侧往往只听到半个音，
     那里对不上不作为风险依据；只看两个片段都可靠的区间。按中点归属时它们本来就不会被保留（A 的边缘在切点之后，B 的在切点之前）。
 
-纯文本模式：在 A 的末尾和 B 的开头之间找最长的公共片段，去掉 B 中重复的部分；
-forced 边界找不到时标记为高风险。
+纯文本模式：仅在相邻窗口有重叠时匹配 A 的后缀与 B 的前缀；不确定时保留原文。
 """
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from typing import Any
 
 from ..asr.types import AudioWindow, Word
@@ -199,6 +198,8 @@ def merge_words(pieces: list[tuple[AudioWindow, list[Word]]], tolerance: float =
 
 # ---- 纯文本合并 -------------------------------------------------------------
 _SPACE_RE = re.compile(r"\s+")
+# 用宽松的语速上限约束可能来自重叠区的字符数。
+_TEXT_CHARS_PER_SECOND = 20
 
 
 def _norm_with_map(text: str) -> tuple[str, list[int]]:
@@ -213,32 +214,47 @@ def _norm_with_map(text: str) -> tuple[str, list[int]]:
 
 
 def dedupe_text(a: str, b: str, min_match: int = 4, window: int = 80) -> tuple[str, bool]:
-    """去掉 b 开头与 a 结尾重复的部分。返回 (新的 b, 是否找到重复)。"""
-    a_norm, _ = _norm_with_map(a)
+    """只在后缀和前缀完全匹配、且落在文字边界时去重。"""
+    a_norm, a_map = _norm_with_map(a)
     b_norm, b_map = _norm_with_map(b)
-    tail, head = a_norm[-window:], b_norm[:window]
-    if not tail or not head:
-        return b, False
-    m = SequenceMatcher(None, tail, head, autojunk=False).find_longest_match(0, len(tail), 0, len(head))
-    if m.size < min_match:
-        return b, False
-    cut = b_map[m.b + m.size - 1] + 1  # 原文中重复片段之后的位置
-    return b[cut:].lstrip(" ,，、.。!！?？"), True
+    for size in range(min(window, len(a_norm), len(b_norm)), max(1, min_match) - 1, -1):
+        if a_norm[-size:] != b_norm[:size]:
+            continue
+        start = len(a_norm) - size
+        if (start > 0 and a_map[start - 1] == a_map[start]) or (size < len(b_map) and b_map[size - 1] == b_map[size]):
+            continue  # 规范化后扩展成多个字符的原字符也不能被切开
+        cut = b_map[size - 1] + 1
+        if _text_boundary(a, a_map[start]) and _text_boundary(b, cut):
+            return b[cut:].lstrip(" ,，、.。!！?？"), True
+    return b, False
+
+
+def _text_boundary(text: str, cut: int) -> bool:
+    if cut == 0 or cut == len(text):
+        return True
+    left, right = text[cut - 1], text[cut]
+    return not (left.isalnum() and right.isalnum()) or bool(CJK_RE.search(left + right))
 
 
 def merge_text(pieces: list[tuple[AudioWindow, str]]) -> tuple[list[TextBlock], list[BoundaryReport]]:
     pieces = sorted(pieces, key=lambda p: p[0].core_start)
     blocks: list[TextBlock] = []
     reports: list[BoundaryReport] = []
+    previous: AudioWindow | None = None
     prev_text = ""
-    for k, (w, text) in enumerate(pieces):
-        text = _SPACE_RE.sub(" ", text).strip()
-        if k > 0:
-            text, found = dedupe_text(prev_text, text)
-            kind = w.left or "silence"
+    for w, raw in pieces:
+        text = _SPACE_RE.sub(" ", raw).strip()
+        if previous is not None:
+            overlap = min(previous.end, w.end) - max(previous.start, w.start)
+            found = False
+            if overlap > 0:
+                limit = min(80, math.ceil(overlap * _TEXT_CHARS_PER_SECOND))
+                text, found = dedupe_text(prev_text, text, window=limit)
+            kind = w.left or previous.right or "silence"
+            uncertain = overlap > 0 and bool(prev_text and raw.strip()) and not found
             reports.append(BoundaryReport(w.core_start, kind, "text_overlap" if found else "concat",
-                                          risky=not found and kind == "forced"))
+                                          risky=uncertain or (not found and kind == "forced")))
         if text:
             blocks.append(TextBlock(w.core_start, w.core_end, text))
-        prev_text = text or prev_text
+        previous, prev_text = w, text
     return blocks, reports

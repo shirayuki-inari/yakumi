@@ -1,8 +1,10 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
-from yakumi import media, pipeline
+from yakumi import files, media, pipeline
 from yakumi.models import Segment
 from yakumi.pipeline import Job, run
 
@@ -66,3 +68,20 @@ def test_transcribe_only_without_target(fake_cfg, sample_video):
     state = run(job, fake_cfg)
     assert "translate" not in state.completed
     assert "w0 w1 w2" in job.subtitle_path.read_text(encoding="utf-8")
+
+
+def test_atomic_json_writers_use_independent_temporary_files(tmp_path, monkeypatch):
+    path = tmp_path / "state.json"
+    barrier = Barrier(2, timeout=5)
+    replace = files.os.replace
+
+    def replace_together(src, dst):
+        barrier.wait()
+        replace(src, dst)
+
+    monkeypatch.setattr(files.os, "replace", replace_together)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda n: files.write_json(path, {"value": n}), [1, 2]))
+
+    assert files.read_json(path) in ({"value": 1}, {"value": 2})
+    assert list(tmp_path.iterdir()) == [path]

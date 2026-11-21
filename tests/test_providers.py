@@ -4,6 +4,8 @@ import pytest
 from yakumi.asr.base import ASRError, ASRTimeout, ASRTooLarge
 from yakumi.asr.openai_compat import OpenAICompatASR
 from yakumi.config import load_config
+from yakumi.llm import chat_from_config
+from yakumi.segment import segment_llm_config
 
 # 与实测的 OpenRouter + Gemini 3.5 Transcribe 返回格式一致
 VERBOSE = {
@@ -121,7 +123,56 @@ def test_config_precedence(tmp_path, monkeypatch):
     cfg = load_config(path)
     assert cfg["translate"]["model"] == "from-env"
     assert cfg["subtitle"]["bilingual"] is True
-    assert cfg["asr"]["api_key"] == "or-key"  # OpenRouter 优先于 OpenAI
+    assert cfg["asr"]["api_key"] == "or-key"
     assert cfg["asr"]["base_url"] == "https://openrouter.ai/api/v1"
     cfg = load_config(path, overrides={"translate": {"model": "from-cli", "provider": None}})
     assert cfg["translate"]["model"] == "from-cli" and cfg["translate"]["provider"] == "openai"
+
+
+def test_service_keys_follow_the_final_endpoint(tmp_path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text('[translate]\napi_key = "configured-key"\n', encoding="utf-8")
+    monkeypatch.delenv("YAKUMI_ASR_API_KEY", raising=False)
+    monkeypatch.delenv("YAKUMI_TRANSLATE_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "oa-key")
+    monkeypatch.setenv("YAKUMI_ASR_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("YAKUMI_TRANSLATE_BASE_URL", "http://localhost:11434/v1")
+    cfg = load_config(path)
+    assert cfg["asr"]["api_key"] == "oa-key"
+    assert not cfg["translate"].get("api_key")
+
+    for base in ("http://openrouter.ai/api/v1", "https://openrouter.ai:9443/api/v1",
+                 "https://model.example/openrouter.ai"):
+        cfg = load_config(path, overrides={"asr": {"base_url": base}})
+        assert not cfg["asr"].get("api_key")
+
+    monkeypatch.setenv("YAKUMI_TRANSLATE_API_KEY", "local-test-key")
+    cfg = load_config(path)
+    assert cfg["translate"]["api_key"] == "local-test-key"
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    cfg = load_config(path, overrides={"asr": {"base_url": "https://openrouter.ai/api/v1"}})
+    assert not cfg["asr"].get("api_key")
+
+
+def test_segmentation_credentials_stay_with_their_origin(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[translate]\napi_key = "translate-key"\n[segment]\napi_key = "segment-key"\n', encoding="utf-8")
+    calls = []
+
+    def reply(request):
+        calls.append((request.url.host, request.headers.get("Authorization")))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "text"}}]})
+
+    with httpx.Client(transport=httpx.MockTransport(reply)) as client:
+        for segment in (
+            {"base_url": "https://openrouter.ai:443/other"},
+            {"base_url": "http://localhost:1234/v1"},
+            {"base_url": "http://localhost:1234/v1", "api_key": "new-key"},
+        ):
+            cfg = load_config(path, use_env=False, overrides={"segment": segment})
+            assert chat_from_config(segment_llm_config(cfg), client=client).complete("s", "u") == "text"
+        cfg = load_config(path, use_env=False, overrides={"translate": {"base_url": "http://[::1]:11434/v1"}})
+        assert not segment_llm_config(cfg).get("api_key")
+
+    assert calls == [("openrouter.ai", "Bearer segment-key"), ("localhost", None), ("localhost", "Bearer new-key")]

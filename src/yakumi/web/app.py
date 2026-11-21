@@ -18,17 +18,19 @@ import secrets
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlsplit
 
 from flask import Flask, abort, jsonify, render_template, request, send_file, url_for
 
-from .. import glossary as glossary_store
+from .. import glossary as glossary_store, media
 from ..config import load_config
+from ..files import write_json
 from ..models import STAGES, JobState, Segment
 from ..stats import format_stats
-from ..pipeline import Job, PipelineError, run
+from ..pipeline import Job, JobBusyError, PipelineError, run
 from ..subtitle.formats import FORMATS
 from ..translate.base import LANG_NAMES, lang_name
 
@@ -66,37 +68,64 @@ class Runner:
         self.active: set[str] = set()
         self.lock = threading.Lock()
 
-    def submit(self, job: Job, from_stage: str | None = None) -> bool:
+    @contextmanager
+    def reserve(self, job_id: str) -> Iterator[ExitStack]:
         with self.lock:
-            if job.state.id in self.active:
-                return False
-            self.active.add(job.state.id)
+            if job_id in self.active:
+                raise JobBusyError("任务正在处理中，请稍候")
+            self.active.add(job_id)
+        with ExitStack() as reservation:
+            reservation.callback(self._release, job_id)
+            try:
+                reservation.enter_context(Job.lock(self.cfg["workspace"]["dir"], job_id))
+            except JobBusyError:
+                raise
+            except PipelineError:
+                abort(404)
+            yield reservation
+
+    def _release(self, job_id: str) -> None:
+        with self.lock:
+            self.active.discard(job_id)
+
+    def submit(self, job: Job, reservation: ExitStack, from_stage: str | None = None) -> None:
         job.state.status, job.state.error, job.state.message = "pending", None, "排队中"
-        job.save()
-        self.pool.submit(self._run, job.state.id, from_stage)
-        return True
+        # 网页任务按服务配置执行。清除它即将替换的 CLI 阶段指纹。
+        completed = set(job.state.completed)
+        if from_stage:
+            completed.difference_update(STAGES[STAGES.index(from_stage):])
+        if job.state.stage_inputs is not None:
+            for stage in job.state.stage_inputs.keys() - completed:
+                job.state.stage_inputs[stage] = ""
+        if from_stage:
+            job.invalidate_from(from_stage)
+        else:
+            job.save()
+        worker_reservation = reservation.pop_all()
+        try:
+            self.pool.submit(self._run, job, worker_reservation)
+        except Exception:
+            with worker_reservation:
+                job.state.status, job.state.error, job.state.message = "error", "无法提交后台任务", "处理失败"
+                job.save()
+            raise
 
     def busy(self, job_id: str) -> bool:
         with self.lock:
             return job_id in self.active
 
-    def _run(self, job_id: str, from_stage: str | None) -> None:
-        try:
-            job = Job.load(self.cfg["workspace"]["dir"], job_id)
-            run(job, self.cfg, from_stage=from_stage)
-        except Exception as exc:
-            # run() 会把阶段内的错误写进 state.json；这里兜住载入任务等更早的失败，保证页面能看到
-            log.exception("任务 %s 失败", job_id)
+    def _run(self, job: Job, reservation: ExitStack) -> None:
+        with reservation:
             try:
-                job = Job.load(self.cfg["workspace"]["dir"], job_id)
+                run(job, self.cfg)
+            except Exception as exc:
+                log.exception("任务 %s 失败", job.state.id)
                 if job.state.status != "error":
-                    job.state.status, job.state.error, job.state.message = "error", str(exc), "处理失败"
-                    job.save()
-            except Exception:
-                log.exception("无法记录任务 %s 的错误状态", job_id)
-        finally:
-            with self.lock:
-                self.active.discard(job_id)
+                    try:
+                        job.state.status, job.state.error, job.state.message = "error", str(exc), "处理失败"
+                        job.save()
+                    except OSError:
+                        log.exception("无法记录任务 %s 的错误状态", job.state.id)
 
 
 def _view(state: JobState) -> dict[str, Any]:
@@ -140,19 +169,29 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
     @app.errorhandler(413)
     def too_large(_exc):
         return jsonify(error=f"文件太大，上限为 {max_mb} MB（可以修改配置 web.max_upload_mb）"), 413
+
+    @app.errorhandler(JobBusyError)
+    def job_busy(exc):
+        return jsonify(error=str(exc)), 409
+
     runner = Runner(cfg)
     app.extensions["yakumi_runner"] = runner
 
     # 上次进程退出时仍在运行的任务已经中断，标记出来，方便用户点“继续”。
     for state in Job.list(workspace):
         if state.status in ("running", "pending"):
-            job = Job.load(workspace, state.id)
-            job.state.status, job.state.error = "error", "服务重启，任务已中断，可以点击“保存并生成”继续"
-            job.save()
+            try:
+                with Job.lock(workspace, state.id):
+                    job = Job.load(workspace, state.id, migrate=False)
+                    if job.state.status in ("running", "pending"):
+                        job.state.status, job.state.error = "error", "服务重启，任务已中断，可以点击“保存并生成”继续"
+                        job.save()
+            except JobBusyError:
+                continue
 
     def load(job_id: str) -> Job:
         try:
-            return Job.load(workspace, job_id)
+            return Job.load(workspace, job_id, migrate=False)
         except PipelineError:
             abort(404)
 
@@ -191,7 +230,7 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
     # ---- 页面 ----------------------------------------------------------
     @app.get("/")
     def index():
-        jobs = [view(Job.load(workspace, s.id)) for s in Job.list(workspace)[:50]]
+        jobs = [view(load(s.id)) for s in Job.list(workspace)[:50]]
         return render_template("index.html", jobs=jobs, languages=LANGUAGES, glossaries=glossary_summaries(),
                                default_target="zh", default_bilingual=bool(cfg["subtitle"]["bilingual"]))
 
@@ -238,17 +277,19 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
             if not glossary_store.path_of(gid).is_file():
                 abort(404)
             g = _glossary_from_body()
-            if g.id != gid and any(runner.busy(s.id) and gid in s.glossaries for s in Job.list(workspace)):
-                return jsonify(error="有正在处理的任务使用这个术语表，请等它完成后再改名"), 409
-            glossary_store.save(g, old_id=gid)
-        except glossary_store.GlossaryError as exc:
-            return jsonify(error=str(exc)), 400
-        if g.id != gid:  # 改名后，同步更新引用它的任务
-            for state in Job.list(workspace):
-                if gid in state.glossaries:
-                    job = Job.load(workspace, state.id)
+            with ExitStack() as reservations:
+                jobs = []
+                if g.id != gid:
+                    for state in Job.list(workspace):
+                        if gid in state.glossaries:
+                            reservations.enter_context(runner.reserve(state.id))
+                            jobs.append(load(state.id))
+                glossary_store.save(g, old_id=gid)
+                for job in jobs:
                     job.state.glossaries = [g.id if i == gid else i for i in job.state.glossaries]
                     job.save()
+        except glossary_store.GlossaryError as exc:
+            return jsonify(error=str(exc)), 400
         return jsonify(g.to_dict())
 
     @app.delete("/api/glossaries/<gid>")
@@ -262,7 +303,7 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
     # ---- API -----------------------------------------------------------
     @app.get("/api/jobs")
     def api_jobs():
-        return jsonify([view(Job.load(workspace, s.id)) for s in Job.list(workspace)[:50]])
+        return jsonify([view(load(s.id)) for s in Job.list(workspace)[:50]])
 
     @app.post("/api/jobs")
     def api_create():
@@ -291,8 +332,9 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
                          bilingual=request.form.get("bilingual") == "true",
                          burn=request.form.get("burn") == "true", fmt=fmt, move_video=True,
                          glossaries=glossaries, notes=notes)
-        job.path("meta.json").write_text(json.dumps({"name": name}, ensure_ascii=False), encoding="utf-8")
-        runner.submit(job)
+        with runner.reserve(job.state.id) as reservation:
+            write_json(job.path("meta.json"), {"name": name})
+            runner.submit(job, reservation)
         return jsonify(id=job.state.id, url=url_for("job_page", job_id=job.state.id)), 201
 
     @app.get("/api/jobs/<job_id>")
@@ -303,60 +345,77 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
     def api_segments(job_id: str):
         return jsonify([s.to_dict() for s in load(job_id).segments()])
 
+    def edit_body() -> dict[str, Any]:
+        body = request.get_json(silent=True)
+        if body is None and not request.data:
+            return {}
+        if not isinstance(body, dict):
+            response = jsonify(error="请求数据格式不正确")
+            response.status_code = 400
+            abort(response)
+        return body
+
+    def check_revision(job: Job, body: dict[str, Any]) -> None:
+        if "revision" in body and body["revision"] != job.state.revision:
+            raise JobBusyError("任务已更新，请刷新页面后再保存")
+
     @app.post("/api/jobs/<job_id>/render")
     def api_render(job_id: str):
         """保存修改过的字幕和导出设置，然后从“生成字幕”阶段重新执行。"""
-        job = load(job_id)
-        if runner.busy(job_id):
-            return jsonify(error="任务正在处理中，请稍候"), 409
-        body = request.get_json(silent=True) or {}
-        st = job.state
-        if "segments" in body and body["segments"] is not None:
-            current = job.segments()
-            items = body["segments"]
-            if not isinstance(items, list) or len(items) != len(current):
-                return jsonify(error="字幕条数与原任务不一致"), 400
-            if not all(isinstance(i, dict) and all(isinstance(i.get(k, ""), str) for k in ("text", "translation"))
-                       for i in items):
-                return jsonify(error="字幕数据格式不正确"), 400
-            edited = [Segment(c.start, c.end, i.get("text", c.text), i.get("translation", c.translation), c.group)
-                      for c, i in zip(current, items)]
-            job.save_segments(edited)
-        if "format" in body:
-            if body["format"] not in FORMATS:
+        with runner.reserve(job_id) as reservation:
+            job = load(job_id)
+            st = job.state
+            body = edit_body()
+            check_revision(job, body)
+            if body.get("format", st.format) not in FORMATS:
                 return jsonify(error="不支持的字幕格式"), 400
-            st.format = body["format"]
-        if "bilingual" in body:
-            st.bilingual = bool(body["bilingual"])
-        if "burn" in body:
-            st.burn = bool(body["burn"])
-        job.save()
-        # 已完成识别和翻译的任务只需从生成字幕开始；中断或失败的任务从断点续跑。
-        prepared = set(STAGES[:STAGES.index("translate")]) | ({"translate"} if st.target_lang else set())
-        from_stage = "write" if prepared <= set(st.completed) else None
-        runner.submit(job, from_stage=from_stage)
-        return jsonify(view(job))
+            if any(k in body and not isinstance(body[k], bool) for k in ("bilingual", "burn")):
+                return jsonify(error="导出选项格式不正确"), 400
+            edited: list[Segment] = []
+            if body.get("segments") is not None:
+                current = job.segments()  # 待迁移的任务没有可校对的字幕
+                items = body["segments"]
+                if not isinstance(items, list) or len(items) != len(current):
+                    return jsonify(error="字幕条数与原任务不一致"), 400
+                if not all(isinstance(i, dict)
+                           and all(isinstance(i.get(k, ""), str) for k in ("text", "translation")) for i in items):
+                    return jsonify(error="字幕数据格式不正确"), 400
+                edited = [Segment(c.start, c.end, i.get("text", c.text), i.get("translation", c.translation), c.group)
+                          for c, i in zip(current, items)]
+            # 请求全部校验通过后才迁移和写盘，被拒的请求不改动任务。
+            job.migrate()
+            if edited:
+                job.save_segments(edited)
+            st.format = body.get("format", st.format)
+            st.bilingual = body.get("bilingual", st.bilingual)
+            st.burn = body.get("burn", st.burn)
+            # 已完成识别和翻译的任务只需从生成字幕开始；中断或失败的任务从断点续跑。
+            prepared = set(STAGES[:STAGES.index("translate")]) | ({"translate"} if st.target_lang else set())
+            from_stage = "write" if prepared <= set(st.completed) else None
+            runner.submit(job, reservation, from_stage=from_stage)
+        return jsonify(view(load(job_id)))
 
     @app.post("/api/jobs/<job_id>/retranslate")
     def api_retranslate(job_id: str):
         """更换术语表和补充信息后重新翻译（会覆盖校对过的译文）。"""
-        job = load(job_id)
-        if runner.busy(job_id):
-            return jsonify(error="任务正在处理中，请稍候"), 409
-        if not job.state.target_lang:
-            return jsonify(error="这个任务只做识别，没有翻译"), 400
-        body = request.get_json(silent=True) or {}
-        try:
-            glossaries = check_glossaries(body.get("glossaries", job.state.glossaries))
-        except ValueError as exc:
-            return jsonify(error=str(exc)), 400
-        notes = body.get("notes", job.state.notes)
-        if not isinstance(notes, str):
-            return jsonify(error="补充信息格式不正确"), 400
-        job.state.glossaries, job.state.notes = glossaries, notes.strip()[:4000]
-        job.invalidate_from("translate")  # 术语表的内容可能改过，即使选择没变也重新翻译
-        runner.submit(job)
-        return jsonify(view(job))
+        with runner.reserve(job_id) as reservation:
+            job = load(job_id)
+            if not job.state.target_lang:
+                return jsonify(error="这个任务只做识别，没有翻译"), 400
+            body = edit_body()
+            check_revision(job, body)
+            try:
+                glossaries = check_glossaries(body.get("glossaries", job.state.glossaries))
+            except ValueError as exc:
+                return jsonify(error=str(exc)), 400
+            notes = body.get("notes", job.state.notes)
+            if not isinstance(notes, str):
+                return jsonify(error="补充信息格式不正确"), 400
+            job.migrate()
+            job.state.glossaries, job.state.notes = glossaries, notes.strip()[:4000]
+            # 术语表的内容可能改过，即使选择没变也重新翻译。
+            runner.submit(job, reservation, from_stage="translate")
+        return jsonify(view(load(job_id)))
 
     @app.get("/jobs/<job_id>/files/<name>")
     def job_file(job_id: str, name: str):
@@ -369,9 +428,15 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
             abort(404)
         if not path.is_file():
             abort(404)
-        resp = send_file(path, conditional=True, mimetype="text/vtt" if name == "preview" else None)
         if name == "preview":
+            resp = send_file(path, conditional=True, mimetype="text/vtt")
             resp.headers["Cache-Control"] = "no-store"
+        else:
+            preview_type = media.preview_mimetype(path)
+            resp = send_file(path, conditional=True, mimetype=preview_type or "application/octet-stream",
+                             as_attachment=preview_type is None)
+            resp.headers["X-Content-Type-Options"] = "nosniff"
+            resp.headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
         return resp
 
     @app.get("/jobs/<job_id>/download/<kind>")

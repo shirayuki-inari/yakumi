@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+from contextlib import contextmanager
+from errno import EACCES, EAGAIN, EDEADLK
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 def config_dir() -> Path:
@@ -22,9 +25,40 @@ def cache_dir() -> Path:
 
 def write_json(path: Path, data: Any) -> None:
     """先写临时文件再改名，中途被打断也不会留下写了一半的文件。"""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    payload = json.dumps(data, ensure_ascii=False, indent=1)
+    f = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False)
+    tmp = Path(f.name)
+    try:
+        with f:
+            f.write(payload)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+class FileBusyError(RuntimeError):
+    pass
+
+
+@contextmanager
+def lock_file(path: Path) -> Iterator[None]:
+    """非阻塞文件锁，句柄关闭时由操作系统释放。锁文件需保留供其他进程使用。"""
+    with path.open("a+b") as f:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in (EACCES, EAGAIN, EDEADLK):
+                raise
+            raise FileBusyError from exc
+        yield
 
 
 def read_json(path: Path) -> Any:

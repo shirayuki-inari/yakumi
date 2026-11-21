@@ -24,8 +24,9 @@ import re
 import secrets
 import shutil
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from . import glossary as glossary_store
 from . import media
@@ -36,7 +37,7 @@ from .chunking.merge import TextBlock, merge_text, merge_words
 from .chunking.repair import Repairer
 from .chunking.transcribe import WindowedTranscriber, WindowPlan, load_pieces
 from .chunking.vad import create_vad
-from .files import read_json, write_json
+from .files import FileBusyError, lock_file, read_json, write_json
 from .llm import record_usage
 from .models import PIPELINE_VERSION, STAGES, JobState, Segment, segments_from_list, segments_to_list
 from .segment import create_segmenter, segment_blocks, segment_words
@@ -76,6 +77,10 @@ class PipelineError(RuntimeError):
     pass
 
 
+class JobBusyError(PipelineError):
+    pass
+
+
 def new_job_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
 
@@ -90,7 +95,8 @@ class Job:
     def create(cls, workspace: str | Path, video: str | Path, target_lang: str | None,
                source_lang: str | None = None, bilingual: bool = False, burn: bool = False,
                fmt: str = "srt", move_video: bool = False, job_id: str | None = None,
-               glossaries: list[str] | None = None, notes: str = "") -> "Job":
+               glossaries: list[str] | None = None, notes: str = "",
+               stage_inputs: dict[str, str] | None = None) -> "Job":
         """创建任务。`move_video` 为真时把视频移入任务目录（用于网页上传的临时文件）。"""
         root = Path(workspace) / "jobs"
         now = time.time()
@@ -98,7 +104,7 @@ class Job:
             id=job_id or new_job_id(), video=str(Path(video).resolve()), target_lang=target_lang or "",
             source_lang=source_lang or None, bilingual=bilingual, burn=burn, format=fmt,
             created_at=now, updated_at=now, pipeline_version=PIPELINE_VERSION,
-            glossaries=list(glossaries or []), notes=notes.strip(),
+            glossaries=list(glossaries or []), notes=notes.strip(), stage_inputs=stage_inputs,
         )
         job = cls(root, state)
         job.dir.mkdir(parents=True, exist_ok=True)
@@ -110,7 +116,7 @@ class Job:
         return job
 
     @classmethod
-    def load(cls, workspace: str | Path, job_id: str) -> "Job":
+    def load(cls, workspace: str | Path, job_id: str, *, migrate: bool = True) -> "Job":
         if not JOB_ID_RE.fullmatch(job_id):  # 任务 ID 会拼进路径，不允许 / 和 .. 之类的字符
             raise PipelineError(f"找不到任务：{job_id}")
         root = Path(workspace) / "jobs"
@@ -118,12 +124,28 @@ class Job:
         if not path.is_file():
             raise PipelineError(f"找不到任务：{job_id}")
         job = cls(root, JobState.from_dict(read_json(path)))
-        if job.state.pipeline_version != PIPELINE_VERSION:
-            job.migrate()
+        if migrate and job.state.pipeline_version != PIPELINE_VERSION:
+            with cls.lock(workspace, job_id):
+                job = cls.load(workspace, job_id, migrate=False)
+                job.migrate()
         return job
+
+    @staticmethod
+    @contextmanager
+    def lock(workspace: str | Path, job_id: str) -> Iterator[None]:
+        directory = Path(workspace) / "jobs" / job_id
+        if not JOB_ID_RE.fullmatch(job_id) or not (directory / "state.json").is_file():
+            raise PipelineError(f"找不到任务：{job_id}")
+        try:
+            with lock_file(directory / ".lock"):
+                yield
+        except FileBusyError as exc:
+            raise JobBusyError("任务正在处理中，请稍候") from exc
 
     def migrate(self) -> None:
         st = self.state
+        if st.pipeline_version == PIPELINE_VERSION:
+            return
         keep_until = MIGRATIONS.get(st.pipeline_version)
         if keep_until:
             idx = STAGES.index(keep_until)
@@ -151,6 +173,7 @@ class Job:
 
     def save(self) -> None:
         self.state.updated_at = time.time()
+        self.state.revision += 1
         write_json(self.dir / "state.json", self.state.to_dict())
 
     def path(self, name: str) -> Path:
@@ -162,6 +185,8 @@ class Job:
 
     # ---- 分段读写（Web 编辑使用）--------------------------------------
     def segments(self) -> list[Segment]:
+        if self.state.pipeline_version != PIPELINE_VERSION:
+            return []  # 待迁移的任务会删除或重建这些文件，不提供给校对
         for name in ("translated.json", "aligned.json"):
             if self.path(name).is_file():
                 return segments_from_list(read_json(self.path(name)))

@@ -17,6 +17,7 @@
   const settings = { bilingual: job.bilingual, burn: job.burn, format: job.format };
   let segments = [];
   let dirty = false;
+  let submitting = false;
   let pollTimer = null;
   let loadedFor = null;
   let rows = [];
@@ -50,6 +51,13 @@
   // ---- 状态 -----------------------------------------------------------
   const busy = () => job.busy || job.status === "running" || job.status === "pending";
 
+  function setEditorBusy() {
+    const locked = submitting || busy();
+    renderBtn.disabled = locked;
+    if (retranslateBtn) retranslateBtn.disabled = locked;
+    cueList.querySelectorAll("textarea").forEach((el) => (el.readOnly = locked));
+  }
+
   function showState() {
     chip.dataset.status = job.status;
     chip.textContent = job.status_label;
@@ -63,8 +71,7 @@
     summary.hidden = !job.summary || busy();
     errorBox.hidden = job.status !== "error" || !job.error;
     errorBox.textContent = job.error || "";
-    renderBtn.disabled = busy();
-    if (retranslateBtn) retranslateBtn.disabled = busy();
+    setEditorBusy();
     renderBtn.querySelector("span").textContent = job.status === "error" ? "继续处理" : "保存并生成";
     for (const kind of ["subtitles", "video"]) {
       const link = document.querySelector(`[data-download="${kind}"]`);
@@ -193,13 +200,17 @@
   });
 
   async function loadSegments() {
-    if (dirty || loadedFor === job.updated_at) return;
+    if (dirty || loadedFor === job.revision) return;
+    const revision = job.revision;
     try {
       const res = await fetch(`/api/jobs/${job.id}/segments`);
       if (!res.ok) return;
-      segments = await res.json();
-      loadedFor = job.updated_at;
+      const loaded = await res.json();
+      if (dirty || job.revision !== revision) return;
+      segments = loaded;
+      loadedFor = revision;
       renderCues();
+      setEditorBusy();
     } catch {
       /* 忽略，下次刷新时再加载 */
     }
@@ -222,8 +233,10 @@
 
   // ---- 保存并生成 -----------------------------------------------------
   renderBtn.addEventListener("click", async () => {
-    renderBtn.disabled = true;
-    const body = { ...settings };
+    if (submitting || busy()) return;
+    submitting = true;
+    setEditorBusy();
+    const body = { ...settings, revision: dirty ? loadedFor : job.revision };
     if (dirty) body.segments = segments.map(({ text, translation }) => ({ text, translation }));
     try {
       const res = await fetch(`/api/jobs/${job.id}/render`, {
@@ -242,7 +255,9 @@
     } catch (err) {
       errorBox.textContent = `保存失败：${err.message}`;
       errorBox.hidden = false;
-      renderBtn.disabled = false;
+    } finally {
+      submitting = false;
+      setEditorBusy();
     }
   });
 
@@ -279,10 +294,13 @@
     notesBox.addEventListener("input", () => autosize(notesBox));
 
     retranslateBtn.addEventListener("click", async () => {
+      if (submitting || busy()) return;
       if (job.completed?.includes("translate") &&
           !window.confirm("重新翻译会覆盖校对过的译文，确定继续吗？")) return;
-      retranslateBtn.disabled = true;
+      submitting = true;
+      setEditorBusy();
       const body = {
+        revision: job.revision,
         glossaries: [...picker.querySelectorAll("input:checked")].map((b) => b.value),
         notes: notesBox.value,
       };
@@ -303,7 +321,9 @@
       } catch (err) {
         errorBox.textContent = `重新翻译失败：${err.message}`;
         errorBox.hidden = false;
-        retranslateBtn.disabled = false;
+      } finally {
+        submitting = false;
+        setEditorBusy();
       }
     });
   }

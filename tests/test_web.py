@@ -1,7 +1,10 @@
 import time
+from threading import Event
 
 import pytest
 
+from yakumi.models import PIPELINE_VERSION, Segment, STAGES
+from yakumi.pipeline import Job
 from yakumi.web.app import create_app
 
 
@@ -67,6 +70,23 @@ def test_upload_process_edit_download(app, sample_video):
     assert vtt.mimetype == "text/vtt" and "手动修改" in vtt.get_data(as_text=True)
     src = client.get(f"/jobs/{job_id}/files/source", headers={"Range": "bytes=0-99"})
     assert src.status_code == 206
+    assert src.mimetype == "video/mp4"
+    assert src.headers["X-Content-Type-Options"] == "nosniff"
+    assert src.headers["Content-Disposition"].startswith("inline")
+
+
+@pytest.mark.parametrize("suffix", [".txt", ".mp4"])
+def test_source_of_unverified_type_is_attachment(app, tmp_path, suffix):
+    source = tmp_path / ("source" + suffix)
+    source.write_bytes(b"unrecognized media")
+    workspace = app.extensions["yakumi_runner"].cfg["workspace"]["dir"]
+    job = Job.create(workspace, source, "zh")
+    resp = app.test_client().get(f"/jobs/{job.state.id}/files/source")
+    assert resp.get_data() == b"unrecognized media"
+    assert resp.mimetype == "application/octet-stream"
+    assert resp.headers["Content-Disposition"].startswith("attachment")
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert "sandbox" in resp.headers["Content-Security-Policy"]
 
 
 def test_render_rejects_bad_input(app, sample_video):
@@ -75,7 +95,13 @@ def test_render_rejects_bad_input(app, sample_video):
         job_id = client.post("/api/jobs", data={"video": (f, "a.mp4"), "target": "zh"}).get_json()["id"]
     wait_idle(app, client, job_id)
     assert client.post(f"/api/jobs/{job_id}/render", json={"segments": []}).status_code == 400
-    assert client.post(f"/api/jobs/{job_id}/render", json={"format": "doc"}).status_code == 400
+    original_state = client.get(f"/api/jobs/{job_id}").get_json()
+    original = client.get(f"/api/jobs/{job_id}/segments").get_json()
+    changes = [{"text": "需要保存的修改"} for _ in original]
+    assert client.post(f"/api/jobs/{job_id}/render", json={"format": "doc", "segments": changes}).status_code == 400
+    assert client.post(f"/api/jobs/{job_id}/render", json=["invalid"]).status_code == 400
+    assert client.get(f"/api/jobs/{job_id}/segments").get_json() == original
+    assert client.get(f"/api/jobs/{job_id}").get_json() == original_state
     assert client.get("/api/jobs/nope").status_code == 404
     assert client.get(f"/jobs/{job_id}/files/state.json").status_code == 404
 
@@ -166,3 +192,71 @@ def test_busy_job_rejects_changes(app, sample_video):
         with runner.lock:
             runner.active.discard(job_id)
     assert client.post(f"/api/jobs/{job_id}/render", json={"segments": [{"text": None}]}).status_code == 400
+
+
+def test_parallel_render_and_stale_revision_are_rejected(fake_cfg, tmp_path, monkeypatch):
+    workspace = fake_cfg["workspace"]["dir"]
+    job = Job.create(workspace, tmp_path / "source.mp4", "zh")
+    job.save_segments([Segment(0, 1, "original")])
+    job.state.completed = STAGES[:-1]
+    job.state.status = "done"
+    job.save()
+    revision = job.state.revision
+    first_app = create_app(cfg=fake_cfg)
+    second_app = create_app(cfg=fake_cfg)
+    started, release = Event(), Event()
+    runs = []
+
+    def run(job, cfg):
+        runs.append(job.segments()[0].text)
+        started.set()
+        assert release.wait(5)
+        job.state.status = "done"
+        job.save()
+
+    monkeypatch.setattr("yakumi.web.app.run", run)
+    url = f"/api/jobs/{job.state.id}/render"
+    first, second = first_app.test_client(), second_app.test_client()
+    payload = {"segments": [{"text": "first"}], "format": "ass", "revision": revision}
+    try:
+        assert first.post(url, json=payload).status_code == 200
+        assert started.wait(5)
+        payload.update(segments=[{"text": "second"}], format="vtt")
+        assert first.post(url, json=payload).status_code == 409
+        assert second.post(url, json=payload).status_code == 409
+    finally:
+        release.set()
+    assert wait_idle(first_app, first, job.state.id)["status"] == "done"
+    assert second.post(url, json=payload).status_code == 409
+    saved = Job.load(workspace, job.state.id)
+    assert saved.state.format == "ass" and saved.segments()[0].text == "first"
+    assert runs == ["first"]
+
+
+def test_legacy_job_edit_is_rejected_without_migrating(fake_cfg, tmp_path, monkeypatch):
+    workspace = fake_cfg["workspace"]["dir"]
+    job = Job.create(workspace, tmp_path / "source.mp4", "zh")
+    job.save_segments([Segment(0, 1, "old", "旧")])
+    job.state.completed, job.state.status = list(STAGES[:-1]), "done"
+    job.state.pipeline_version = PIPELINE_VERSION - 1
+    job.save()
+    before = (tmp_path / "before.json")
+    before.write_bytes(job.path("state.json").read_bytes())
+    app = create_app(cfg=fake_cfg)
+    client = app.test_client()
+    url = f"/api/jobs/{job.state.id}"
+
+    # 迁移会删除旧字幕，页面不应提供它们用于校对
+    assert client.get(f"{url}/segments").get_json() == []
+    resp = client.post(f"{url}/render", json={"segments": [{"text": "edited"}]})
+    assert resp.status_code == 400
+    assert job.path("state.json").read_bytes() == before.read_bytes()
+    assert job.path("translated.json").is_file()
+
+    runs = []
+    monkeypatch.setattr("yakumi.web.app.run", lambda job, cfg: runs.append(job.state.completed[:]))
+    assert client.post(f"{url}/render", json={"format": "vtt"}).status_code == 200
+    wait_idle(app, client, job.state.id)
+    migrated = Job.load(workspace, job.state.id, migrate=False).state
+    assert migrated.pipeline_version == PIPELINE_VERSION and migrated.format == "vtt"
+    assert not job.path("translated.json").exists() and runs == [STAGES[:STAGES.index("segment")]]

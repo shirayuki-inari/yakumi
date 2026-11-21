@@ -68,6 +68,8 @@ class JobState:
     created_at: float = 0.0
     updated_at: float = 0.0
     pipeline_version: int = 1
+    stage_inputs: dict[str, str] | None = None
+    revision: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

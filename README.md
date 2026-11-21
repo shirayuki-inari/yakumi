@@ -40,7 +40,7 @@ yakumi doctor --online        # 检查运行环境、配置和密钥
 export OPENROUTER_API_KEY=sk-or-...
 ```
 
-识别和翻译也可以分别使用 `YAKUMI_ASR_API_KEY`、`YAKUMI_TRANSLATE_API_KEY`；都没有设置时依次使用 `OPENROUTER_API_KEY`、`OPENAI_API_KEY`。
+识别和翻译也可以分别使用 `YAKUMI_ASR_API_KEY`、`YAKUMI_TRANSLATE_API_KEY`。未设置专用密钥时，OpenRouter 和 OpenAI 的官方 HTTPS 地址分别使用 `OPENROUTER_API_KEY` 和 `OPENAI_API_KEY`。切换到其他服务时，可以在指定新地址的同一配置层显式提供该服务的密钥。断句默认继承同一服务的翻译密钥，连接到另一服务时可在 `[segment]` 中单独设置 `api_key`。
 
 也可以写进配置文件：把 `yakumi.example.toml` 复制为 `~/.config/yakumi/config.toml`（全局）或当前目录下的 `yakumi.toml`（项目级），只写需要修改的项。例如换一个翻译模型：
 
@@ -98,7 +98,7 @@ yakumi burn talk.mp4 talk.zh.srt
 yakumi jobs
 ```
 
-再次对同一视频执行 `yakumi run` 时，会沿用已有的识别和翻译结果；只改变 `--bilingual`、`--burn`、`--format` 时只重新导出，不会重复调用接口。加上 `--force` 则从头开始。
+再次执行 `yakumi run` 时，Yakumi 会比较视频内容、语言和各阶段配置，重跑发生变化的阶段及其下游。只改变 `--bilingual`、`--burn`、`--format` 时，可以继续使用已有的识别和翻译结果。升级后首次遇到没有输入指纹的旧命令行任务时，会建立新任务，旧任务仍可在工作台查看。加上 `--force` 可从头开始。
 
 运行结束时会显示识别统计和费用。费用直接取自 OpenRouter 返回的 `usage.cost`，Gemini 3.5 Transcribe 实测约 $0.33/小时音频。
 

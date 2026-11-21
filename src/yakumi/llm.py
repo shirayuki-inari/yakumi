@@ -27,6 +27,8 @@ from typing import Any
 
 import httpx
 
+from .config import is_openrouter
+
 RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
 ROUTING_SUFFIX = {"default": "", "floor": ":floor", "nitro": ":nitro"}
 THINK_RE = re.compile(r"<think>.*?</think>", re.S)
@@ -53,7 +55,7 @@ class ChatClient:
         if routing not in ROUTING_SUFFIX:
             raise error(f"未知的路由模式：{routing}（可选 default / floor / nitro）")
         self.url = base_url.rstrip("/") + "/chat/completions"
-        self.openrouter = "openrouter.ai" in base_url
+        self.openrouter = is_openrouter(base_url)
         self.model = model
         self.api_key = api_key
         self.temperature = temperature

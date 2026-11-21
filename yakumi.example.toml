@@ -2,7 +2,8 @@
 # 复制为 ~/.config/yakumi/config.toml（全局）或当前目录下的 yakumi.toml（项目级）后按需修改。
 # 优先级：内置默认值 → 全局配置 → 项目配置 → 环境变量 → 命令行参数。
 # 密钥也可以用环境变量提供：YAKUMI_ASR_API_KEY / YAKUMI_TRANSLATE_API_KEY，
-# 都没有时依次使用 OPENROUTER_API_KEY、OPENAI_API_KEY。
+# 官方 HTTPS 地址分别使用 OPENROUTER_API_KEY、OPENAI_API_KEY 作为回退。
+# 切换到其他服务时，在指定新地址的同一配置层提供该服务的密钥。
 # 下面列出的都是默认值，只需写出要改的项。
 
 [asr]
@@ -63,7 +64,9 @@ notes = ""
 [segment]
 # 断句：把识别结果切成完整的句子（翻译单位），再把每句拆成若干条字幕（显示单位）
 mode = "llm"             # llm（模型按语义断句，只插入换行、不改任何文字）| rules（只按句末标点）
-# 断句沿用 [translate] 的接口、模型、密钥和路由；需要时可以单独指定：
+# 断句默认沿用 [translate] 的接口、模型和路由。密钥只在同一服务来源下继承。
+# base_url = "http://127.0.0.1:11434/v1"
+# api_key = ""
 # model = "google/gemini-3.8-flash"
 reasoning_effort = "low" # 断句只需要插入换行，low 就够（约 $0.05/小时视频）
 temperature = 0

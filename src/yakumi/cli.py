@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import click
 
 from . import __version__, media
 from . import glossary as glossary_store
-from .config import ConfigError, config_files, load_config
-from .models import JobState
+from .config import ConfigError, config_files, is_local_service, is_openrouter, load_config
+from .models import STAGES, JobState
 from .pipeline import STAGE_LABELS, Job, PipelineError, record_translation_usage, run, translation_config
+from .segment import INHERITED, segment_llm_config
 from .stats import format_stats
 from .subtitle.formats import FORMATS, read_subtitles, render
 from .translate import create_translator
@@ -50,13 +54,12 @@ def _progress_printer():
     return show
 
 
-def _find_job(workspace: str, video: Path, target: str | None, source: str | None) -> Job | None:
+def _find_job(workspace: str, video: Path, target: str | None, source: str | None) -> JobState | None:
     """找最近一个同一视频、同一语言设置的任务，用于续跑或复用识别和翻译结果。"""
     video_str = str(video.resolve())
     for state in Job.list(workspace):
-        if state.video == video_str and state.target_lang == (target or "") and \
-                (not source or state.source_lang == source):
-            return Job.load(workspace, state.id)
+        if (state.video, state.target_lang, state.source_lang) == (video_str, target or "", source or None):
+            return state
     return None
 
 
@@ -69,25 +72,97 @@ def _check_glossaries(ids: tuple[str, ...]) -> list[str]:
     return list(ids)
 
 
-def _prepare_job(cfg: dict[str, Any], video: Path, target: str | None, source: str | None,
-                 bilingual: bool, burn: bool, fmt: str, force: bool,
-                 glossaries: list[str] | None = None, notes: str | None = None) -> Job:
-    workspace = cfg["workspace"]["dir"]
-    job = None if force else _find_job(workspace, video, target, source)
-    if job is None:
-        return Job.create(workspace, video, target, source, bilingual, burn, fmt,
-                          glossaries=glossaries, notes=notes or "")
+# 只影响密钥、速度或客户端等待时间的设置，不改变阶段结果，不参与指纹。
+# asr.timeout 会发给服务端并决定分窗，需要保留；translate.concurrency 决定上下文是否带译文，也要保留。
+RUNTIME_ONLY = {
+    "asr": {"api_key", "threads"},
+    "segment": {"api_key", "timeout", "concurrency"},
+    "translate": {"api_key", "timeout"},
+}
+
+
+def _stage_inputs(cfg: dict[str, Any], state: JobState) -> dict[str, str]:
+    """记录 CLI 各阶段的输入，续跑时只重做受变化影响的阶段。"""
+    with open(state.video, "rb") as video:
+        media_digest = hashlib.file_digest(video, "sha256").hexdigest()
+    chunk = cfg["chunking"]
+    vad = {key: chunk.get(key) for key in ("vad", "vad_threshold", "silence_db")}
+    merge = {key: chunk.get(key) for key in ("match_tolerance", "edge_margin")}
+    asr = {key: val for key, val in cfg["asr"].items() if key not in RUNTIME_ONLY["asr"]}
+    asr["source_lang"] = state.source_lang
+    subtitle = cfg["subtitle"]
+    cue = {key: subtitle.get(key) for key in ("max_chars", "max_chars_cjk", "min_duration", "max_duration")}
+    segment = {key: val for key, val in cfg["segment"].items()
+               if key not in INHERITED and key not in RUNTIME_ONLY["segment"]}
+    if segment.get("mode") == "llm":
+        llm = segment_llm_config(cfg)
+        segment.update({key: llm.get(key) for key in INHERITED if key not in RUNTIME_ONLY["segment"]})
+        segment["has_key"] = bool(llm.get("api_key")) if llm.get("provider") == "openai" else False
+    style = {"font": subtitle.get("font"), "font_size": subtitle.get("font_size")}
+    inputs = {
+        "extract": media_digest,
+        "vad": vad,
+        "transcribe": [asr, {key: val for key, val in chunk.items() if key not in vad and key not in merge}],
+        "merge": merge,
+        "repair": [cfg["repair"], cfg["alignment"]],
+        "segment": [segment, cue],
+        "write": [state.format, state.bilingual, subtitle.get("punctuation"), style if state.format == "ass" else None],
+        "burn": [state.burn, style, subtitle.get("fonts_dir")] if state.burn else False,
+    }
+    if state.target_lang:
+        translation = translation_config(cfg["translate"], state.glossaries, state.notes)
+        for key in RUNTIME_ONLY["translate"]:
+            translation.pop(key, None)
+        translation["glossary"] = list(translation["glossary"].items())
+        inputs["translate"] = translation
+    return {stage: hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+            for stage, value in inputs.items()}
+
+
+def _update_job_inputs(job: Job, cfg: dict[str, Any], bilingual: bool, burn: bool, fmt: str,
+                       glossaries: list[str] | None, notes: str | None) -> None:
     st = job.state
-    # 没有指定时沿用任务原来的设置；指定了且有变化时重新翻译
-    if glossaries is not None or notes is not None:
-        new_ids = glossaries if glossaries is not None else st.glossaries
-        if job.set_translation_context(new_ids, st.notes if notes is None else notes) and st.target_lang:
-            click.echo("术语表或补充信息有变化，将重新翻译", err=True)
-    if (st.bilingual, st.burn, st.format) != (bilingual, burn, fmt):
-        st.bilingual, st.burn, st.format = bilingual, burn, fmt
-        job.invalidate_from("write")
-    click.echo(f"沿用任务 {st.id}（已完成：{'、'.join(STAGE_LABELS[s] for s in st.completed) or '无'}）", err=True)
-    return job
+    st.bilingual, st.burn, st.format = bilingual, burn, fmt
+    if glossaries is not None:
+        st.glossaries = glossaries
+    if notes is not None:
+        st.notes = notes.strip()
+    current = _stage_inputs(cfg, st)
+    previous, st.stage_inputs = st.stage_inputs or {}, current
+    changed = next((stage for stage in STAGES if previous.get(stage) != current.get(stage)), None)
+    if previous and changed:
+        job.invalidate_from(changed)
+        click.echo(f"任务输入有变化，将从「{STAGE_LABELS[changed]}」重新处理", err=True)
+    else:
+        job.save()
+
+
+@contextmanager
+def _prepare_job(cfg: dict[str, Any], video: Path, target: str | None, source: str | None,
+                 bilingual: bool, burn: bool, fmt: str, force: bool, glossaries: list[str] | None = None,
+                 notes: str | None = None) -> Iterator[Job]:
+    workspace = cfg["workspace"]["dir"]
+    previous = None if force else _find_job(workspace, video, target, source)
+    reuse = previous is not None and previous.stage_inputs is not None
+    try:
+        if reuse:
+            job_id = previous.id
+        else:
+            if previous is not None:
+                glossaries = previous.glossaries if glossaries is None else glossaries
+                notes = previous.notes if notes is None else notes
+            job_id = Job.create(workspace, video, target, source, bilingual, burn, fmt,
+                                glossaries=glossaries, notes=notes or "", stage_inputs={}).state.id
+        with Job.lock(workspace, job_id):
+            job = Job.load(workspace, job_id, migrate=False)
+            job.migrate()
+            _update_job_inputs(job, cfg, bilingual, burn, fmt, glossaries, notes)
+            if reuse:
+                completed = "、".join(STAGE_LABELS[s] for s in job.state.completed) or "无"
+                click.echo(f"沿用任务 {job_id}（已完成：{completed}）", err=True)
+            yield job
+    except (OSError, PipelineError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _execute(cfg: dict[str, Any], job: Job) -> None:
@@ -160,10 +235,10 @@ def run_cmd(ctx, video: Path, target, source, bilingual, burn, fmt, glossaries, 
     bilingual = cfg["subtitle"]["bilingual"] if bilingual is None else bilingual
     fmt = fmt or cfg["subtitle"]["format"]
     ids = _check_glossaries(glossaries) if glossaries else None
-    job = _prepare_job(cfg, video, target, source, bilingual, burn, fmt, force, ids, notes)
-    _execute(cfg, job)
-    for path in _export(job, out_dir or video.parent, video.stem, target):
-        click.echo(str(path))
+    with _prepare_job(cfg, video, target, source, bilingual, burn, fmt, force, ids, notes) as job:
+        _execute(cfg, job)
+        for path in _export(job, out_dir or video.parent, video.stem, target):
+            click.echo(str(path))
 
 
 @main.command()
@@ -179,11 +254,11 @@ def transcribe(ctx, media_file: Path, source, fmt, asr_provider, out_dir, force)
     """只做语音识别，导出原文字幕。"""
     cfg = _cfg(ctx, asr={"provider": asr_provider})
     fmt = fmt or cfg["subtitle"]["format"]
-    job = _prepare_job(cfg, media_file, None, source, False, False, fmt, force)
-    _execute(cfg, job)
-    tag = job.state.source_lang or "orig"
-    for path in _export(job, out_dir or media_file.parent, media_file.stem, tag):
-        click.echo(str(path))
+    with _prepare_job(cfg, media_file, None, source, False, False, fmt, force) as job:
+        _execute(cfg, job)
+        tag = job.state.source_lang or "orig"
+        for path in _export(job, out_dir or media_file.parent, media_file.stem, tag):
+            click.echo(str(path))
 
 
 @main.command()
@@ -460,11 +535,11 @@ def doctor(ctx, online: bool):
 
     tr = cfg["translate"]
     click.echo(f"• 翻译：{tr['base_url']}  模型 {tr['model']}")
-    openrouter = "openrouter.ai" in tr["base_url"]
+    openrouter = is_openrouter(tr["base_url"])
     unit = "整句翻译" if tr.get("unit", "sentence") == "sentence" else "逐条翻译"
     click.echo(f"    {unit}，思考档位 {tr.get('reasoning_effort') or '模型默认'}，并发 {tr.get('concurrency', 1)}"
                + (f"，路由 {tr.get('routing', 'default')}" if openrouter else ""))
-    local = any(h in tr["base_url"] for h in ("127.0.0.1", "localhost"))
+    local = is_local_service(tr["base_url"])
     line(bool(tr.get("api_key")) or local, "翻译 API Key",
          "设置 OPENROUTER_API_KEY（或 YAKUMI_TRANSLATE_API_KEY）；本地服务可以不填")
 
@@ -474,7 +549,7 @@ def doctor(ctx, online: bool):
     seg_cfg = segment_llm_config(cfg)
     if sg.get("mode", "llm") == "llm":
         click.echo(f"• 断句：LLM，模型 {seg_cfg['model']}，思考档位 {seg_cfg.get('reasoning_effort') or '模型默认'}")
-        seg_local = any(h in seg_cfg["base_url"] for h in ("127.0.0.1", "localhost"))
+        seg_local = is_local_service(seg_cfg["base_url"])
         line(bool(seg_cfg.get("api_key")) or seg_local, "断句可以调用模型",
              "没有密钥，将改用规则断句（只按句末标点）", warn=True)
     else:
@@ -489,7 +564,7 @@ def doctor(ctx, online: bool):
             targets.insert(0, ("语音识别接口", asr["base_url"], asr.get("api_key")))
         for name, base, key in targets:
             # OpenRouter 的 /key 能同时验证密钥；其他兼容服务用 /models
-            path = "/key" if "openrouter.ai" in base else "/models"
+            path = "/key" if is_openrouter(base) else "/models"
             try:
                 resp = httpx.get(base.rstrip("/") + path, timeout=15,
                                  headers={"Authorization": f"Bearer {key}"} if key else {})
@@ -499,7 +574,7 @@ def doctor(ctx, online: bool):
                 line(False, f"{name}连通", str(exc))
         if openrouter:
             _check_openrouter_model(tr, line, "翻译", "translate.reasoning_effort")
-            if sg.get("mode", "llm") == "llm" and "openrouter.ai" in seg_cfg["base_url"]:
+            if sg.get("mode", "llm") == "llm" and is_openrouter(seg_cfg["base_url"]):
                 _check_openrouter_model(seg_cfg, line, "断句", "segment.reasoning_effort")
     sys.exit(0 if ok else 1)
 
