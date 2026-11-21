@@ -1,0 +1,394 @@
+"""网页工作台：上传视频、查看进度、校对字幕、重新生成与下载。
+
+任务在进程内的单线程池里排队执行，状态全部来自任务目录的 state.json，
+不需要数据库或消息队列。
+
+工作台没有登录功能，默认只监听本机。为了不被其他网页利用（访问恶意网页时，浏览器可以向
+127.0.0.1 发请求，替你上传文件、发起要花钱的识别和翻译），所有修改类请求都会检查：
+- Origin：浏览器带上的来源必须和本站一致，拒绝跨站请求；
+- Host：只接受 IP 地址、localhost 和配置里 web.allowed_hosts 列出的域名，防止 DNS 重绑定。
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import json
+import logging
+import secrets
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+from flask import Flask, abort, jsonify, render_template, request, send_file, url_for
+
+from .. import glossary as glossary_store
+from ..config import load_config
+from ..models import STAGES, JobState, Segment
+from ..stats import format_stats
+from ..pipeline import Job, PipelineError, run
+from ..subtitle.formats import FORMATS
+from ..translate.base import LANG_NAMES, lang_name
+
+LANGUAGES = [
+    ("zh", "简体中文"), ("zh-TW", "繁體中文"), ("en", "English"), ("ja", "日本語"), ("ko", "한국어"),
+    ("fr", "Français"), ("de", "Deutsch"), ("es", "Español"), ("pt", "Português"), ("ru", "Русский"),
+    ("it", "Italiano"), ("vi", "Tiếng Việt"), ("th", "ไทย"), ("id", "Bahasa Indonesia"), ("ar", "العربية"),
+]
+LANG_CODES = {code for code, _ in LANGUAGES}
+STATUS_LABELS = {"pending": "排队中", "running": "处理中", "done": "已完成", "error": "失败"}
+MEDIA_TYPES = {"srt": "application/x-subrip", "ass": "text/x-ssa", "vtt": "text/vtt"}
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+log = logging.getLogger(__name__)
+
+
+def host_allowed(host: str, allowed: list[str]) -> bool:
+    """Host 头是否可信：IP 地址、localhost，或配置里明确允许的域名。"""
+    name = urlsplit(f"//{host}").hostname or ""
+    if name == "localhost" or name in allowed:
+        return True
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return True
+
+
+class Runner:
+    """串行执行任务，同一任务不会重复入队。"""
+
+    def __init__(self, cfg: dict[str, Any]):
+        self.cfg = cfg
+        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yakumi-job")
+        self.active: set[str] = set()
+        self.lock = threading.Lock()
+
+    def submit(self, job: Job, from_stage: str | None = None) -> bool:
+        with self.lock:
+            if job.state.id in self.active:
+                return False
+            self.active.add(job.state.id)
+        job.state.status, job.state.error, job.state.message = "pending", None, "排队中"
+        job.save()
+        self.pool.submit(self._run, job.state.id, from_stage)
+        return True
+
+    def busy(self, job_id: str) -> bool:
+        with self.lock:
+            return job_id in self.active
+
+    def _run(self, job_id: str, from_stage: str | None) -> None:
+        try:
+            job = Job.load(self.cfg["workspace"]["dir"], job_id)
+            run(job, self.cfg, from_stage=from_stage)
+        except Exception as exc:
+            # run() 会把阶段内的错误写进 state.json；这里兜住载入任务等更早的失败，保证页面能看到
+            log.exception("任务 %s 失败", job_id)
+            try:
+                job = Job.load(self.cfg["workspace"]["dir"], job_id)
+                if job.state.status != "error":
+                    job.state.status, job.state.error, job.state.message = "error", str(exc), "处理失败"
+                    job.save()
+            except Exception:
+                log.exception("无法记录任务 %s 的错误状态", job_id)
+        finally:
+            with self.lock:
+                self.active.discard(job_id)
+
+
+def _view(state: JobState) -> dict[str, Any]:
+    if state.target_lang:
+        src = lang_name(state.source_lang) if state.source_lang else "自动识别"
+        lang_label = f"{src} → {lang_name(state.target_lang)}"
+    else:
+        lang_label = "仅识别"
+    data = state.to_dict()
+    data.update(
+        name=Path(state.video).name,
+        lang_label=lang_label,
+        status_label=STATUS_LABELS.get(state.status, state.status),
+        created=time.strftime("%m-%d %H:%M", time.localtime(state.created_at)),
+    )
+    return data
+
+
+def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None) -> Flask:
+    cfg = cfg or load_config(config_path)
+    workspace = Path(cfg["workspace"]["dir"]).resolve()
+    cfg["workspace"]["dir"] = str(workspace)
+    (workspace / "uploads").mkdir(parents=True, exist_ok=True)
+
+    app = Flask(__name__)
+    app.json.ensure_ascii = False
+    web_cfg = cfg.get("web", {})
+    max_mb = int(web_cfg.get("max_upload_mb", 4096))
+    app.config["MAX_CONTENT_LENGTH"] = max_mb * 1024 * 1024 if max_mb > 0 else None
+    allowed_hosts = [str(h).lower() for h in web_cfg.get("allowed_hosts", [])]
+
+    @app.before_request
+    def guard():
+        if not host_allowed(request.host.lower(), allowed_hosts):
+            return jsonify(error="不允许的访问地址（Host）。需要用域名访问时，请把它加入配置 web.allowed_hosts"), 403
+        origin = request.headers.get("Origin")
+        if request.method in UNSAFE_METHODS and origin and urlsplit(origin).netloc.lower() != request.host.lower():
+            return jsonify(error="拒绝跨站请求"), 403
+        return None
+
+    @app.errorhandler(413)
+    def too_large(_exc):
+        return jsonify(error=f"文件太大，上限为 {max_mb} MB（可以修改配置 web.max_upload_mb）"), 413
+    runner = Runner(cfg)
+    app.extensions["yakumi_runner"] = runner
+
+    # 上次进程退出时仍在运行的任务已经中断，标记出来，方便用户点“继续”。
+    for state in Job.list(workspace):
+        if state.status in ("running", "pending"):
+            job = Job.load(workspace, state.id)
+            job.state.status, job.state.error = "error", "服务重启，任务已中断，可以点击“保存并生成”继续"
+            job.save()
+
+    def load(job_id: str) -> Job:
+        try:
+            return Job.load(workspace, job_id)
+        except PipelineError:
+            abort(404)
+
+    def view(job: Job) -> dict[str, Any]:
+        data = _view(job.state)
+        meta = job.path("meta.json")
+        if meta.is_file():
+            data["name"] = json.loads(meta.read_text(encoding="utf-8")).get("name") or data["name"]
+        data["busy"] = runner.busy(job.state.id)
+        data["summary"] = format_stats(job.state.stats)
+        data["files"] = {
+            "subtitles": url_for("job_download", job_id=job.state.id, kind="subtitles")
+            if "subtitles" in job.state.outputs else None,
+            "video": url_for("job_download", job_id=job.state.id, kind="video")
+            if "video" in job.state.outputs else None,
+            "preview": url_for("job_file", job_id=job.state.id, name="preview")
+            if job.path("preview.vtt").is_file() else None,
+        }
+        return data
+
+    def glossary_summaries() -> list[dict[str, Any]]:
+        return [{"id": g.id, "name": g.name, "count": len(g.terms)} for g in glossary_store.list_all()]
+
+    def to_json(data: Any) -> str:
+        return json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+
+    def check_glossaries(ids: Any) -> list[str]:
+        if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+            raise ValueError("术语表参数格式不正确")
+        known = {g["id"] for g in glossary_summaries()}
+        missing = [i for i in ids if i not in known]
+        if missing:
+            raise ValueError(f"找不到术语表：{'、'.join(missing)}")
+        return ids
+
+    # ---- 页面 ----------------------------------------------------------
+    @app.get("/")
+    def index():
+        jobs = [view(Job.load(workspace, s.id)) for s in Job.list(workspace)[:50]]
+        return render_template("index.html", jobs=jobs, languages=LANGUAGES, glossaries=glossary_summaries(),
+                               default_target="zh", default_bilingual=bool(cfg["subtitle"]["bilingual"]))
+
+    @app.get("/jobs/<job_id>")
+    def job_page(job_id: str):
+        job = load(job_id)
+        data = view(job)
+        return render_template("job.html", job=data, job_json=to_json(data),
+                               glossaries_json=to_json(glossary_summaries()))
+
+    @app.get("/glossaries")
+    def glossaries_page():
+        items = [g.to_dict() for g in glossary_store.list_all()]
+        return render_template("glossaries.html", glossaries=items, glossaries_json=to_json(items),
+                               glossaries_dir=str(glossary_store.glossaries_dir()))
+
+    # ---- 术语表 API -----------------------------------------------------
+    @app.get("/api/glossaries")
+    def api_glossaries():
+        return jsonify([g.to_dict() for g in glossary_store.list_all()])
+
+    def _glossary_from_body() -> glossary_store.Glossary:
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            raise glossary_store.GlossaryError("数据格式不正确")
+        if not isinstance(body.get("terms", {}), (dict, list)) or not isinstance(body.get("notes", ""), str):
+            raise glossary_store.GlossaryError("数据格式不正确")
+        return glossary_store.Glossary.from_dict(body)
+
+    @app.post("/api/glossaries")
+    def api_glossary_create():
+        try:
+            g = _glossary_from_body()
+            if glossary_store.path_of(g.id).exists():
+                return jsonify(error=f"已经有名为“{g.name}”的术语表"), 409
+            glossary_store.save(g)
+        except glossary_store.GlossaryError as exc:
+            return jsonify(error=str(exc)), 400
+        return jsonify(g.to_dict()), 201
+
+    @app.put("/api/glossaries/<gid>")
+    def api_glossary_update(gid: str):
+        try:
+            if not glossary_store.path_of(gid).is_file():
+                abort(404)
+            g = _glossary_from_body()
+            if g.id != gid and any(runner.busy(s.id) and gid in s.glossaries for s in Job.list(workspace)):
+                return jsonify(error="有正在处理的任务使用这个术语表，请等它完成后再改名"), 409
+            glossary_store.save(g, old_id=gid)
+        except glossary_store.GlossaryError as exc:
+            return jsonify(error=str(exc)), 400
+        if g.id != gid:  # 改名后，同步更新引用它的任务
+            for state in Job.list(workspace):
+                if gid in state.glossaries:
+                    job = Job.load(workspace, state.id)
+                    job.state.glossaries = [g.id if i == gid else i for i in job.state.glossaries]
+                    job.save()
+        return jsonify(g.to_dict())
+
+    @app.delete("/api/glossaries/<gid>")
+    def api_glossary_delete(gid: str):
+        try:
+            glossary_store.delete(gid)
+        except glossary_store.GlossaryError:
+            abort(404)
+        return jsonify(ok=True)
+
+    # ---- API -----------------------------------------------------------
+    @app.get("/api/jobs")
+    def api_jobs():
+        return jsonify([view(Job.load(workspace, s.id)) for s in Job.list(workspace)[:50]])
+
+    @app.post("/api/jobs")
+    def api_create():
+        upload = request.files.get("video")
+        if not upload or not upload.filename:
+            return jsonify(error="请选择视频文件"), 400
+        target = request.form.get("target", "zh")
+        if target not in LANG_CODES:
+            return jsonify(error="不支持的目标语言"), 400
+        source = request.form.get("source") or None
+        if source and source not in LANG_CODES:
+            return jsonify(error="不支持的原语言"), 400
+        fmt = request.form.get("format") or cfg["subtitle"]["format"]
+        if fmt not in FORMATS:
+            return jsonify(error="不支持的字幕格式"), 400
+        try:
+            glossaries = check_glossaries(request.form.getlist("glossaries"))
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        notes = request.form.get("notes", "")[:4000]
+        name = Path(upload.filename).name
+        suffix = Path(name).suffix.lower()[:8] or ".mp4"
+        tmp = workspace / "uploads" / f"{secrets.token_hex(8)}{suffix}"
+        upload.save(tmp)
+        job = Job.create(workspace, tmp, target, source,
+                         bilingual=request.form.get("bilingual") == "true",
+                         burn=request.form.get("burn") == "true", fmt=fmt, move_video=True,
+                         glossaries=glossaries, notes=notes)
+        job.path("meta.json").write_text(json.dumps({"name": name}, ensure_ascii=False), encoding="utf-8")
+        runner.submit(job)
+        return jsonify(id=job.state.id, url=url_for("job_page", job_id=job.state.id)), 201
+
+    @app.get("/api/jobs/<job_id>")
+    def api_job(job_id: str):
+        return jsonify(view(load(job_id)))
+
+    @app.get("/api/jobs/<job_id>/segments")
+    def api_segments(job_id: str):
+        return jsonify([s.to_dict() for s in load(job_id).segments()])
+
+    @app.post("/api/jobs/<job_id>/render")
+    def api_render(job_id: str):
+        """保存修改过的字幕和导出设置，然后从“生成字幕”阶段重新执行。"""
+        job = load(job_id)
+        if runner.busy(job_id):
+            return jsonify(error="任务正在处理中，请稍候"), 409
+        body = request.get_json(silent=True) or {}
+        st = job.state
+        if "segments" in body and body["segments"] is not None:
+            current = job.segments()
+            items = body["segments"]
+            if not isinstance(items, list) or len(items) != len(current):
+                return jsonify(error="字幕条数与原任务不一致"), 400
+            if not all(isinstance(i, dict) and all(isinstance(i.get(k, ""), str) for k in ("text", "translation"))
+                       for i in items):
+                return jsonify(error="字幕数据格式不正确"), 400
+            edited = [Segment(c.start, c.end, i.get("text", c.text), i.get("translation", c.translation), c.group)
+                      for c, i in zip(current, items)]
+            job.save_segments(edited)
+        if "format" in body:
+            if body["format"] not in FORMATS:
+                return jsonify(error="不支持的字幕格式"), 400
+            st.format = body["format"]
+        if "bilingual" in body:
+            st.bilingual = bool(body["bilingual"])
+        if "burn" in body:
+            st.burn = bool(body["burn"])
+        job.save()
+        # 已完成识别和翻译的任务只需从生成字幕开始；中断或失败的任务从断点续跑。
+        prepared = set(STAGES[:STAGES.index("translate")]) | ({"translate"} if st.target_lang else set())
+        from_stage = "write" if prepared <= set(st.completed) else None
+        runner.submit(job, from_stage=from_stage)
+        return jsonify(view(job))
+
+    @app.post("/api/jobs/<job_id>/retranslate")
+    def api_retranslate(job_id: str):
+        """更换术语表和补充信息后重新翻译（会覆盖校对过的译文）。"""
+        job = load(job_id)
+        if runner.busy(job_id):
+            return jsonify(error="任务正在处理中，请稍候"), 409
+        if not job.state.target_lang:
+            return jsonify(error="这个任务只做识别，没有翻译"), 400
+        body = request.get_json(silent=True) or {}
+        try:
+            glossaries = check_glossaries(body.get("glossaries", job.state.glossaries))
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        notes = body.get("notes", job.state.notes)
+        if not isinstance(notes, str):
+            return jsonify(error="补充信息格式不正确"), 400
+        job.state.glossaries, job.state.notes = glossaries, notes.strip()[:4000]
+        job.invalidate_from("translate")  # 术语表的内容可能改过，即使选择没变也重新翻译
+        runner.submit(job)
+        return jsonify(view(job))
+
+    @app.get("/jobs/<job_id>/files/<name>")
+    def job_file(job_id: str, name: str):
+        job = load(job_id)
+        if name == "source":
+            path = Path(job.state.video)
+        elif name == "preview":
+            path = job.path("preview.vtt")
+        else:
+            abort(404)
+        if not path.is_file():
+            abort(404)
+        resp = send_file(path, conditional=True, mimetype="text/vtt" if name == "preview" else None)
+        if name == "preview":
+            resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.get("/jobs/<job_id>/download/<kind>")
+    def job_download(job_id: str, kind: str):
+        job = load(job_id)
+        data = view(job)
+        stem = Path(data["name"]).stem or job.state.id
+        tag = job.state.target_lang or job.state.source_lang or "orig"
+        if kind == "subtitles" and "subtitles" in job.state.outputs:
+            path = job.subtitle_path
+            return send_file(path, as_attachment=True, download_name=f"{stem}.{tag}.{job.state.format}",
+                             mimetype=MEDIA_TYPES.get(job.state.format))
+        if kind == "video" and "video" in job.state.outputs and job.path("output.mp4").is_file():
+            return send_file(job.path("output.mp4"), as_attachment=True, download_name=f"{stem}.{tag}.mp4")
+        abort(404)
+
+    return app
+
+
+__all__ = ["create_app", "LANGUAGES", "LANG_NAMES"]

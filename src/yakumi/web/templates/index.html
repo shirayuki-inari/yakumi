@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="source-panel" aria-labelledby="upload-title">
+  <h1 id="upload-title" class="visually-hidden">上传视频</h1>
+  <form class="source-form" data-upload-form>
+    <div class="source-link-field">
+      <span class="field-label">视频文件</span>
+      <label class="url-field file-field">
+        {{ icon("film", 16) }}
+        <input type="file" name="video" accept="video/*,audio/*,.mkv" required />
+        <span class="file-name" data-file-name>选择或拖入视频</span>
+        <span class="file-pick">浏览</span>
+      </label>
+    </div>
+    <div class="source-language-field">
+      <label class="field-label" for="target">翻译成</label>
+      <div class="select-wrap">
+        {{ icon("languages", 16) }}
+        <select id="target" name="target">
+          {% for code, name in languages %}
+          <option value="{{ code }}"{% if code == default_target %} selected{% endif %}>{{ name }}</option>
+          {% endfor %}
+        </select>
+        {{ icon("chevron-down", 16) }}
+      </div>
+    </div>
+    <div>
+      <span class="field-label" aria-hidden="true">&nbsp;</span>
+      <button type="submit" class="primary generate-button" data-submit>
+        {{ icon("upload", 16) }}<span>开始翻译</span>
+      </button>
+    </div>
+    <div class="source-meta">
+      <span class="platform-pill" data-file-meta>支持 MP4、MOV、MKV、WebM 等常见格式</span>
+      <div class="upload-options">
+        <label class="inline-select">
+          <span>原语言</span>
+          <select name="source">
+            <option value="">自动识别</option>
+            {% for code, name in languages %}<option value="{{ code }}">{{ name }}</option>{% endfor %}
+          </select>
+        </label>
+        <span class="inline-toggle">
+          <span id="opt-bilingual">双语</span>
+          <button type="button" class="toggle{% if default_bilingual %} on{% endif %}" role="switch" aria-checked="{{ 'true' if default_bilingual else 'false' }}" aria-labelledby="opt-bilingual" data-toggle="bilingual"><span></span></button>
+        </span>
+        <span class="inline-toggle">
+          <span id="opt-burn">烧录</span>
+          <button type="button" class="toggle" role="switch" aria-checked="false" aria-labelledby="opt-burn" data-toggle="burn"><span></span></button>
+        </span>
+      </div>
+    </div>
+    <details class="context-options">
+      <summary>{{ icon("book-open", 14) }}<span>术语表与补充信息</span><span class="context-count" data-context-count></span></summary>
+      <div class="context-body">
+        <div>
+          <span class="field-label">术语表</span>
+          {% if glossaries %}
+          <div class="chip-picker" data-glossary-picker>
+            {% for g in glossaries %}
+            <label class="chip-option"><input type="checkbox" name="glossaries" value="{{ g.id }}" /><span>{{ g.name }}</span><small>{{ g.count }}</small></label>
+            {% endfor %}
+          </div>
+          {% else %}
+          <p class="field-hint flush">还没有术语表。<a href="{{ url_for('glossaries_page') }}">新建一个</a>，保存人名、专有名词的固定译法，可以在多个视频里复用。</p>
+          {% endif %}
+        </div>
+        <label class="context-notes">
+          <span class="field-label">补充信息（只对这个视频有效）</span>
+          <textarea name="notes" rows="3" maxlength="4000" placeholder="例如：主播称呼粉丝为“助手くん”；这期是第一次 ASMR 直播。"></textarea>
+        </label>
+      </div>
+    </details>
+    <div class="upload-progress" data-upload-progress hidden>
+      <div class="progress"><span data-upload-bar></span></div>
+      <span class="progress-text" data-upload-text>正在上传…</span>
+    </div>
+    <p class="notice error" data-upload-error hidden></p>
+  </form>
+</section>
+
+<section class="control-panel jobs-panel" aria-labelledby="jobs-title">
+  <div class="panel-heading">
+    <h2 id="jobs-title">最近任务</h2>
+    <span class="preview-chip" data-job-count>{{ jobs|length }}</span>
+  </div>
+  <ul class="job-list" data-job-list>
+    {% for job in jobs %}{% include "_job_item.html" %}{% endfor %}
+  </ul>
+  <div class="empty-preview empty-jobs" data-empty-jobs{% if jobs %} hidden{% endif %}>
+    {{ icon("captions", 28) }}
+    <p>还没有任务，上传一个视频开始吧</p>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='app.js') }}"></script>{% endblock %}

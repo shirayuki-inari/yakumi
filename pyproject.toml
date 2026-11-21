@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yakumi"
+dynamic = ["version"]
+description = "轻量的自动化视频翻译工具：语音识别、LLM 断句与整句翻译、字幕导出与烧录"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Yakumi contributors" }]
+requires-python = ">=3.11"
+keywords = ["subtitles", "translation", "speech-recognition", "asr", "ffmpeg", "llm", "srt"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Environment :: Web Environment",
+  "Intended Audience :: End Users/Desktop",
+  "Natural Language :: Chinese (Simplified)",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Multimedia :: Video",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+  "click>=8.1",
+  "httpx>=0.27",
+  "flask>=3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyflakes>=3"]
+# Silero VAD。Termux 上请改用 pkg install python-onnxruntime
+vad = ["numpy>=1.24", "onnxruntime>=1.17"]
+
+[project.scripts]
+yakumi = "yakumi.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "yakumi.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+yakumi = ["web/templates/*.html", "web/static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

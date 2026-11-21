@@ -1,0 +1,117 @@
+# Yakumi 配置示例
+# 复制为 ~/.config/yakumi/config.toml（全局）或当前目录下的 yakumi.toml（项目级）后按需修改。
+# 优先级：内置默认值 → 全局配置 → 项目配置 → 环境变量 → 命令行参数。
+# 密钥也可以用环境变量提供：YAKUMI_ASR_API_KEY / YAKUMI_TRANSLATE_API_KEY，
+# 都没有时依次使用 OPENROUTER_API_KEY、OPENAI_API_KEY。
+# 下面列出的都是默认值，只需写出要改的项。
+
+[asr]
+# openai：任意 OpenAI 兼容的 /audio/transcriptions 接口（默认指向 OpenRouter）
+# whisper_cpp：本地 whisper.cpp（整段识别，不切分）
+provider = "openai"
+base_url = "https://openrouter.ai/api/v1"
+model = "google/gemini-3.5-transcribe"
+# api_key = "sk-or-..."
+mode = "auto"            # auto（首次使用时探测并缓存）| words（词级时间戳）| text（纯文本）
+timeout = 60             # 服务端单次请求超时（秒）；OpenRouter 为 60 秒
+target_window = 300      # 每个识别窗口的目标长度（秒）
+max_window = 480         # 单个窗口的上限（秒），保证处理时间不超过 timeout
+upload_format = "flac"   # flac（16 位无损，约 0.8MB/分钟）| opus（32kbps，约 0.21MB/分钟，网速慢时用）
+
+# 本地 whisper.cpp：
+# provider = "whisper_cpp"
+# whisper_cpp_bin = "~/whisper.cpp/build/bin/whisper-cli"
+# whisper_cpp_model = "~/whisper.cpp/models/ggml-base.bin"
+# threads = 4
+
+[translate]
+# 任意 OpenAI 兼容的 /chat/completions 接口
+base_url = "https://openrouter.ai/api/v1"
+model = "google/gemini-3.8-flash"
+# api_key = "sk-or-..."
+batch_size = 30          # 每次请求翻译的字幕条数
+concurrency = 4          # 同时请求的批数；1 表示逐批进行（上下文会带上一批的译文）
+temperature = 0.2
+timeout = 180            # 单次请求超时（秒）；high 档单批可能接近 1 分钟
+# 思考档位：留空则不发送，使用模型默认值。gemini-3.8-flash 不能关闭思考，可选 low / medium / high。
+# 实测 30 条日语字幕：low 约 4 秒、$0.001，偶有误译；medium 14～45 秒、$0.004～0.006；high 约 52 秒、$0.03
+reasoning_effort = "medium"
+# 路由模式（仅 OpenRouter）：default | floor（按价格，允许 flex 档）| nitro（按吞吐，允许 priority 档）
+routing = "default"
+# 翻译单位：sentence（整句翻译，再把译文按字幕条分段，语序不同时也通顺）| cue（逐条翻译）
+unit = "sentence"
+batch_sentences = 15     # 整句翻译时每批的句子数（每批另外限制在 40 条字幕以内）
+# style = "轻松口语化，保留网络流行语"
+# 对所有任务生效的补充信息（可选）。按频道区分的背景信息建议放进术语表，见 yakumi glossary
+notes = ""
+
+# 本地 Ollama 示例（不需要 api_key）：
+# base_url = "http://127.0.0.1:11434/v1"
+# model = "qwen2.5:7b"
+
+# OpenRouter 的 provider 路由对象，作为请求里的 provider 字段原样透传（可选）
+[translate.provider_routing]
+# sort = "price"
+# order = ["google-ai-studio"]
+# allow_fallbacks = true
+
+# 对所有任务生效的术语：原文 = 译文。可复用的术语表保存在 ~/.config/yakumi/glossaries/，
+# 用 yakumi glossary 或网页“术语表”管理，运行时用 -g 选用，会与这里的术语合并（术语表优先）
+[translate.glossary]
+# "Yakumi" = "Yakumi"
+
+[segment]
+# 断句：把识别结果切成完整的句子（翻译单位），再把每句拆成若干条字幕（显示单位）
+mode = "llm"             # llm（模型按语义断句，只插入换行、不改任何文字）| rules（只按句末标点）
+# 断句沿用 [translate] 的接口、模型、密钥和路由；需要时可以单独指定：
+# model = "google/gemini-3.8-flash"
+reasoning_effort = "low" # 断句只需要插入换行，low 就够（约 $0.05/小时视频）
+temperature = 0
+chunk_chars = 400        # 每次请求的文本长度（字）
+max_sentence_chars = 60  # 希望每句不超过的字数；超过两倍时强制拆开
+concurrency = 4
+cue_gap = 1.2            # 同一句内，停顿超过这么多秒就拆成新的字幕条
+
+[chunking]
+vad = "silero"           # silero | energy（ffmpeg 静音检测）| none；没有 onnxruntime 时自动用 energy
+vad_threshold = 0.5      # Silero 的语音概率阈值
+silence_db = -35         # energy VAD 的静音阈值（dB）
+tolerance = 0.3          # 在目标窗口长度 ±30% 的范围内找切点
+min_gap = 0.3            # 可作为切点的最短停顿（秒）
+overlap = 1.5            # 每个切点两侧各重叠的长度（秒）；VAD 可能把耳语等判为静音，所以停顿处也重叠
+edge_margin = 0.5        # 片段边缘这么多秒内的词可能只是半个音，不作为拼接风险的依据（秒）
+match_tolerance = 0.5    # 合并重叠区时，两个词时间相差不超过该值才算同一个词（秒）
+min_window = 15          # 超时拆分时的最短窗口（秒）
+truncation_slack = 3.0   # 窗口末尾仍有语音、但最后一个词提前超过该值时视为截断（秒）
+text_window = 25         # 纯文本模式下每个窗口的上限（秒）
+
+[repair]
+enabled = true
+context = 6.0            # 复核时截取切点前后各多少秒
+max_repairs = 20         # 每个任务最多复核几处
+min_gap_seconds = 0.8    # 有语音却连续这么久没有词，视为疑似漏字
+
+[alignment]
+backend = "none"         # 强制对齐后端；目前只有 none（直接使用识别返回的时间戳）
+
+[subtitle]
+max_chars = 42           # 拉丁字母语言每行字数
+max_chars_cjk = 20       # 中日韩文字每行字数
+max_duration = 6.0       # 单条字幕最长秒数
+min_duration = 0.8       # 短于此时长的字幕会尝试与相邻条合并
+bilingual = false        # 默认是否输出双语字幕
+format = "srt"           # srt | ass | vtt
+font = ""                # 烧录和 ASS 使用的字体名，留空用系统默认
+fonts_dir = ""           # 额外字体目录，例如 "/system/fonts"
+font_size = 18
+# 标点：subtitle 按字幕惯例处理中日文（句中的逗号、句号换成空格，行尾的去掉；问号、感叹号保留；
+# 省略号统一为 ……）；keep 原样输出。只影响导出，保存的原文和译文保留完整标点
+punctuation = "subtitle"
+
+[web]
+max_upload_mb = 4096     # 网页上传大小上限（MB），0 表示不限制
+allowed_hosts = []       # 用域名访问网页工作台时，把域名加在这里，例如 ["yakumi.lan"]；IP 地址和 localhost 总是允许
+
+[workspace]
+dir = ".yakumi"          # 任务目录（相对于运行命令时的当前目录）
+keep_audio = false       # 任务完成后是否保留抽出的 audio.wav（约 115MB/小时）

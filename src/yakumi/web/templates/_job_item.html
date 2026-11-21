@@ -1,0 +1,10 @@
+<li>
+  <a class="job-item" href="{{ url_for('job_page', job_id=job.id) }}" data-job-id="{{ job.id }}" data-status="{{ job.status }}">
+    <span class="job-icon">{{ icon("film", 18) }}</span>
+    <span class="job-main">
+      <span class="job-name">{{ job.name }}</span>
+      <span class="job-sub">{{ job.lang_label }} · {{ job.created }}</span>
+    </span>
+    <span class="status-chip" data-status="{{ job.status }}">{{ job.status_label }}</span>
+  </a>
+</li>

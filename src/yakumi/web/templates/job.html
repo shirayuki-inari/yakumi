@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}{{ job.name }} · Yakumi{% endblock %}
+{% block content %}
+<div class="job-header">
+  <a class="text-button back-link" href="{{ url_for('index') }}">{{ icon("arrow-left", 14) }}<span>全部任务</span></a>
+  <div class="job-title-row">
+    <h1 class="job-title" title="{{ job.name }}">{{ job.name }}</h1>
+    <span class="status-chip" data-status="{{ job.status }}" data-status-chip>{{ job.status_label }}</span>
+  </div>
+  <p class="job-sub">{{ job.lang_label }} · {{ job.created }}</p>
+</div>
+
+<div class="workspace">
+  <aside class="controls" aria-labelledby="settings-title">
+    <div class="control-panel">
+      <div class="panel-heading"><h2 id="settings-title">导出设置</h2></div>
+
+      <div class="status-box" data-status-box>
+        <div class="progress"><span data-progress-bar></span></div>
+        <p class="progress-text" data-progress-text></p>
+        <p class="field-hint summary" data-summary hidden></p>
+      </div>
+      <p class="notice error" data-error hidden></p>
+
+      <div class="display-options">
+        <div class="toggle-row">
+          <span class="toggle-title" id="set-bilingual">双语字幕</span>
+          <button type="button" class="toggle" role="switch" aria-checked="false" aria-labelledby="set-bilingual" data-setting="bilingual"><span></span></button>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-title" id="set-burn">烧录进视频</span>
+          <button type="button" class="toggle" role="switch" aria-checked="false" aria-labelledby="set-burn" data-setting="burn"><span></span></button>
+        </div>
+      </div>
+
+      <fieldset class="format-field">
+        <legend class="field-label">字幕格式</legend>
+        <div class="segmented" role="radiogroup" data-format>
+          <button type="button" role="radio" data-value="srt">SRT</button>
+          <button type="button" role="radio" data-value="ass">ASS</button>
+          <button type="button" role="radio" data-value="vtt">VTT</button>
+        </div>
+      </fieldset>
+
+      <button type="button" class="primary generate-button render-button" data-render>
+        {{ icon("refresh-cw", 16) }}<span>保存并生成</span>
+      </button>
+
+      <div class="downloads">
+        <a class="secondary-button" data-download="subtitles" hidden>{{ icon("download", 16) }}<span>下载字幕</span></a>
+        <a class="secondary-button" data-download="video" hidden>{{ icon("download", 16) }}<span>下载视频</span></a>
+      </div>
+      <p class="field-hint">修改字幕或设置后，点击“保存并生成”更新导出文件。烧录视频耗时较长。</p>
+    </div>
+
+    {% if job.target_lang %}
+    <div class="control-panel context-panel" data-context-panel>
+      <div class="panel-heading">
+        <h2>术语表与补充信息</h2>
+        <a class="text-button" href="{{ url_for('glossaries_page') }}">管理</a>
+      </div>
+      <div class="chip-picker" data-job-glossaries></div>
+      <p class="field-hint flush" data-no-glossaries hidden>还没有术语表，可以在“管理”里新建。</p>
+      <label class="context-notes">
+        <span class="field-label">补充信息（只对这个视频有效）</span>
+        <textarea rows="3" maxlength="4000" data-job-notes placeholder="人名、节目背景、人物关系等"></textarea>
+      </label>
+      <button type="button" class="secondary-button wide" data-retranslate>
+        {{ icon("languages", 16) }}<span>重新翻译</span>
+      </button>
+      <p class="field-hint">按当前选择的术语表和补充信息重新翻译，不会重新识别。校对过的译文会被覆盖。</p>
+    </div>
+    {% endif %}
+  </aside>
+
+  <section class="preview-panel" aria-labelledby="preview-title">
+    <div class="preview-toolbar">
+      <div class="preview-heading">
+        <h2 id="preview-title">预览</h2>
+        <span class="preview-chip">{{ job.lang_label }}</span>
+      </div>
+    </div>
+    <div class="preview-viewport video-viewport">
+      <video controls playsinline preload="metadata" data-video src="{{ url_for('job_file', job_id=job.id, name='source') }}">
+        <track kind="subtitles" label="字幕" srclang="{{ job.target_lang or 'und' }}" default data-track />
+      </video>
+    </div>
+
+    <div class="control-panel editor-panel">
+      <div class="editor-heading">
+        <h2>字幕校对 <span class="edited-badge" data-edited hidden>· 有未保存的修改</span></h2>
+        <span class="export-format" data-cue-count></span>
+      </div>
+      <div class="cue-list" data-cues></div>
+      <div class="empty-preview empty-cues" data-empty-cues>
+        {{ icon("loader-circle", 24, "spin") }}
+        <p>识别和翻译完成后，可以在这里逐条校对</p>
+      </div>
+    </div>
+  </section>
+</div>
+<script type="application/json" id="job-data">{{ job_json|safe }}</script>
+<script type="application/json" id="glossary-data">{{ glossaries_json|safe }}</script>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='job.js') }}"></script>{% endblock %}
