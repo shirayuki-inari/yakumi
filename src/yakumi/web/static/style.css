@@ -1199,18 +1199,18 @@ textarea::placeholder {
   margin: 0;
   color: var(--ink);
 }
-.help-modal li {
+.help-modal ol > li {
   padding: 0 0 16px 4px;
   font-size: 14px;
 }
-.help-modal li::marker {
+.help-modal ol > li::marker {
   color: var(--ink-3);
   font-variant-numeric: tabular-nums;
 }
 .help-modal strong {
   font-weight: 600;
 }
-.help-modal li p {
+.help-modal ol > li p {
   font-size: 13px;
   color: var(--ink-2);
   line-height: 1.75;
@@ -1751,6 +1751,11 @@ textarea::placeholder {
 @media (max-width: 560px) {
   .mode-switch {
     max-width: none;
+  }
+  /* 纵向排列时子元素按内容宽度排布，省略号不起作用；改为换行，不超出面板 */
+  .platform-pill {
+    max-width: 100%;
+    white-space: normal;
   }
   .setup-banner {
     flex-wrap: wrap;
