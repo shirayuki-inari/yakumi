@@ -4,6 +4,9 @@
 
 ## [未发布]
 
+### 变更
+- “术语表”改名为“背景资料”：它的核心是写进翻译提示词的背景说明，固定译法只是可选部分。界面、帮助和文档统一改用“背景资料 / 背景说明 / 固定译法 / 补充说明”；命令行改为 `yakumi context` 和 `-x/--context`，旧的 `yakumi glossary`、`-g/--glossary` 和网页地址 `/glossaries` 仍然可用。保存的文件和配置键不变。
+
 ### 新增
 - 远程部署：`yakumi passwd` 设置网页登录密码（也支持环境变量 `YAKUMI_WEB_PASSWORD`），登录失败限速，修改密码后旧登录失效；支持反向代理（`[web] proxy_count`）和 HTTPS 下的安全 Cookie；页面带 CSP 等安全响应头。
 - `yakumi serve` 有 waitress 时自动使用它（`pip install 'yakumi[server]'`），否则不再显示 Flask 的“开发服务器”提示和逐条请求日志；对其他设备开放而没有设置密码时拒绝启动（可用 `--no-auth` 跳过）。

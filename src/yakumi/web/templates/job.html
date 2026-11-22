@@ -61,19 +61,19 @@
     {% if job.target_lang %}
     <div class="control-panel context-panel" data-context-panel>
       <div class="panel-heading">
-        <h2>术语表与补充信息</h2>
-        <a class="text-button" href="{{ url_for('glossaries_page') }}">管理</a>
+        <h2>背景资料与补充说明</h2>
+        <a class="text-button" href="{{ url_for('context_page') }}">管理</a>
       </div>
       <div class="chip-picker" data-job-glossaries></div>
-      <p class="field-hint flush" data-no-glossaries hidden>还没有术语表，可以在“管理”里新建。</p>
+      <p class="field-hint flush" data-no-glossaries hidden>还没有背景资料，可以在“管理”里新建。</p>
       <label class="context-notes">
-        <span class="field-label">补充信息（只对这个任务有效）</span>
-        <textarea rows="3" maxlength="4000" data-job-notes placeholder="人名、节目背景、人物关系等"></textarea>
+        <span class="field-label">补充说明（只对这个任务有效）</span>
+        <textarea rows="3" maxlength="4000" data-job-notes placeholder="例如：这期是第一次 ASMR 直播；嘉宾是某某。"></textarea>
       </label>
       <button type="button" class="secondary-button wide" data-retranslate>
         {{ icon("languages", 16) }}<span>重新翻译</span>
       </button>
-      <p class="field-hint">按当前选择的术语表和补充信息重新翻译，不会重新识别。校对过的译文会被覆盖。</p>
+      <p class="field-hint">按当前选择的背景资料和补充说明重新翻译，不会重新识别。校对过的译文会被覆盖。</p>
     </div>
     {% endif %}
 

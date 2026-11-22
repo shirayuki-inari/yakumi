@@ -439,6 +439,7 @@ textarea::placeholder {
   height: 44px;
 }
 .secondary-button {
+  border: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -983,7 +984,7 @@ textarea::placeholder {
   overflow-wrap: anywhere;
 }
 
-/* 术语表选择：可多选的小标签 */
+/* 背景资料选择：可多选的小标签 */
 .chip-picker {
   display: flex;
   flex-wrap: wrap;
@@ -1027,7 +1028,7 @@ textarea::placeholder {
   box-shadow: 0 0 0 3px var(--focus);
 }
 
-/* 上传区：折叠的“术语表与补充信息” */
+/* 上传区：折叠的“背景资料与补充说明” */
 .context-options {
   grid-column: 1 / -1;
   border-top: 1px solid var(--line);
@@ -1072,7 +1073,7 @@ textarea::placeholder {
   border: 0;
 }
 
-/* 术语表管理页 */
+/* 背景资料管理页 */
 .glossary-item {
   width: calc(100% + 16px);
   border: 0;
@@ -1973,4 +1974,8 @@ textarea::placeholder {
 }
 .login-form .editor-field {
   margin-top: 0;
+}
+.editor-field .field-hint {
+  display: block;
+  margin-top: 6px;
 }

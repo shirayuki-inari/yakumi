@@ -150,15 +150,15 @@
     }),
   );
 
-  // 折叠的“术语表与补充信息”标题上显示已选数量
+  // 折叠的“背景资料与补充说明”标题上显示已选数量
   const context = form.querySelector("[data-context]");
   const contextCount = form.querySelector("[data-context-count]");
   function showContext() {
     const n = form.querySelectorAll('input[name="glossaries"]:checked').length;
     const notes = form.querySelector('textarea[name="notes"]').value.trim();
     const parts = [];
-    if (n) parts.push(`${n} 个术语表`);
-    if (notes) parts.push("有补充信息");
+    if (n) parts.push(`${n} 份背景资料`);
+    if (notes) parts.push("有补充说明");
     contextCount.textContent = parts.length ? `· ${parts.join("，")}` : "";
   }
   context.addEventListener("input", showContext);

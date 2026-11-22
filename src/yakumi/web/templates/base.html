@@ -19,7 +19,7 @@
         </a>
         <div class="header-actions">
           {% if logged_in and request.endpoint != 'login' %}
-          <a class="help-button" href="{{ url_for('glossaries_page') }}"{% if request.endpoint == 'glossaries_page' %} aria-current="page"{% endif %}>{{ icon("book-open", 16) }}<span>术语表</span></a>
+          <a class="help-button" href="{{ url_for('context_page') }}"{% if request.endpoint == 'context_page' %} aria-current="page"{% endif %}>{{ icon("book-open", 16) }}<span>背景资料</span></a>
           <a class="help-button" href="{{ url_for('settings_page') }}"{% if request.endpoint == 'settings_page' %} aria-current="page"{% endif %}>{{ icon("settings", 16) }}<span>设置</span></a>
           <button type="button" class="help-button" data-open-help>
             {{ icon("circle-help", 16) }}<span>使用说明</span>
@@ -57,7 +57,7 @@
           <li><strong>等待处理</strong><p>依次进行语音识别、断句、翻译。可以关闭页面，任务会在后台继续。</p></li>
           <li><strong>校对字幕</strong><p>在任务页逐条修改原文和译文，点击视频下方的字幕行可以跳到对应位置。</p></li>
           <li><strong>导出</strong><p>选择单语或双语、字幕格式，以及是否把字幕烧录进视频，然后下载。</p></li>
-          <li><strong>术语表</strong><p>把人名、专有名词的固定译法和节目背景保存成术语表，上传时选用，可以在多个视频里复用。</p></li>
+          <li><strong>背景资料</strong><p>用一两句话说明主播、节目、粉丝名等背景，翻译时原样写进提示词，模型能据此认出被识别写错的人名、统一译法；需要时再加上固定译法。按频道保存，上传时选用，可以在多个视频里复用。</p></li>
         </ol>
         <p class="notice">识别和翻译的服务地址、模型和密钥在 <a href="{{ url_for('settings_page') }}">设置</a> 中修改，那里也可以检查运行环境和测试连接。</p>
       </div>

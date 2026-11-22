@@ -60,7 +60,7 @@ class JobState:
     error: str | None = None
     completed: list[str] = field(default_factory=list)
     outputs: dict[str, str] = field(default_factory=dict)
-    # 翻译时选用的术语表（ID，按顺序合并）和只对这个任务有效的补充信息
+    # 翻译时选用的背景资料（ID，按顺序合并）和只对这个任务有效的补充说明
     glossaries: list[str] = field(default_factory=list)
     notes: str = ""
     # 识别模式、请求次数、费用等统计

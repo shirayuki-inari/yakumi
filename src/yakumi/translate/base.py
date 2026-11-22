@@ -5,7 +5,7 @@
 保证译文与字幕时间轴一一对应。
 
 并发（concurrency > 1）时多批同时请求。此时上一批的译文还没出来，上下文只给上一批的原文；
-术语一致性依靠术语表。concurrency = 1 时上下文同时给出原文和译文。
+人名和专有名词的一致性依靠背景说明和固定译法。concurrency = 1 时上下文同时给出原文和译文。
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ Progress = Callable[[int, int], None]
 # 告诉模型原文并不可靠：识别错误要按本意翻译，而不是照字面硬译
 SOURCE_NOTES = {
     "asr": "原文是自动语音识别（ASR）的结果，并不可靠：可能有同音误写、错字、漏字、多余的字，"
-           "断句和标点也可能不对，人名、昵称和专有名词尤其容易写错。请结合上下文和补充信息判断说话人的本意，"
+           "断句和标点也可能不对，人名、昵称和专有名词尤其容易写错。请结合上下文和背景说明判断说话人的本意，"
            "明显的识别错误直接按正确的意思翻译；实在无法判断时按字面翻译。不要在译文里指出或解释这些错误。",
     "subtitle": "原文是已有的字幕，可能来自语音识别，也可能有错字或误写。遇到明显的错误，"
                 "请结合上下文按正确的意思翻译，不要在译文里指出或解释。",
@@ -68,7 +68,7 @@ class Translator(ABC):
         self.glossary = glossary or {}
         self.notes = notes.strip()
         self.source_kind = source_kind  # asr：原文是语音识别结果；subtitle：已有的字幕文件
-        # 本次翻译实际用到的术语（只含原文里出现过的），由 prepare() 设置
+        # 本次翻译实际用到的固定译法（只含原文里出现过的），由 prepare() 设置
         self.active_glossary: dict[str, str] | None = None
         self.context_lines = context_lines
         self.concurrency = max(1, int(concurrency))
@@ -91,13 +91,13 @@ class Translator(ABC):
         glossary = self.glossary if self.active_glossary is None else self.active_glossary
         if glossary:
             terms = "\n".join(f"- {k} → {v}" if v else f"- {k}（保留原文，不要翻译）" for k, v in glossary.items())
-            parts.append(f"术语表（必须遵守）：\n{terms}")
+            parts.append(f"固定译法（必须遵守）：\n{terms}")
         if self.notes:
-            parts.append(f"补充信息（帮助理解内容和人物，不要翻译、不要写进译文）：\n{self.notes}")
+            parts.append(f"背景说明（帮助理解内容和人物，不要翻译、不要写进译文）：\n{self.notes}")
         return "\n".join(parts)
 
     def prepare(self, texts: list[str]) -> None:
-        """翻译前调用：只把原文里出现过的术语放进提示词。"""
+        """翻译前调用：只把原文里出现过的固定译法放进提示词。"""
         self.active_glossary = relevant_terms(self.glossary, texts)
 
     def system_prompt(self, target: str, source: str | None) -> str:

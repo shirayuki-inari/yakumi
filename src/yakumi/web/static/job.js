@@ -291,7 +291,7 @@
     }
   });
 
-  // ---- 术语表与补充信息 ------------------------------------------------
+  // ---- 背景资料与补充说明 ------------------------------------------------
   const contextPanel = $("[data-context-panel]");
   const retranslateBtn = $("[data-retranslate]");
   if (contextPanel) {
@@ -299,7 +299,7 @@
     const picker = $("[data-job-glossaries]");
     const notesBox = $("[data-job-notes]");
     const known = new Set(allGlossaries.map((g) => g.id));
-    // 已经被删除的术语表也列出来（标记出来），方便取消勾选
+    // 已经被删除的背景资料也列出来（标记出来），方便取消勾选
     const items = [...allGlossaries, ...(job.glossaries || []).filter((id) => !known.has(id)).map((id) => ({ id, name: id, missing: true }))];
     for (const g of items) {
       const label = document.createElement("label");
@@ -311,9 +311,11 @@
       const name = document.createElement("span");
       name.textContent = g.missing ? `${g.name}（已删除）` : g.name;
       label.append(box, name);
-      if (!g.missing) {
+      if (g.summary) label.title = g.summary;
+      if (!g.missing && g.count) {
         const count = document.createElement("small");
         count.textContent = g.count;
+        count.title = "固定译法";
         label.append(count);
       }
       picker.append(label);

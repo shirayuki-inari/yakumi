@@ -12,7 +12,7 @@ from typing import Any, Iterator
 
 
 def config_dir() -> Path:
-    """~/.config/yakumi（或 $XDG_CONFIG_HOME/yakumi）：配置文件、术语表。"""
+    """~/.config/yakumi（或 $XDG_CONFIG_HOME/yakumi）：配置文件、背景资料。"""
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     return Path(base) / "yakumi"
 

@@ -1,8 +1,8 @@
-// 术语表管理：列表、新建、编辑、批量添加、删除。
+// 背景资料管理：列表、新建、编辑背景说明和固定译法、批量添加、删除。
 (() => {
   const $ = (sel) => document.querySelector(sel);
   let glossaries = JSON.parse(document.getElementById("glossary-data").textContent);
-  let current = null; // 正在编辑的术语表 ID；新建时为 null
+  let current = null; // 正在编辑的背景资料 ID；新建时为 null
   let dirty = false;
 
   const list = $("[data-glossary-list]");
@@ -41,7 +41,8 @@
       btn.classList.toggle("selected", g.id === current);
       li.querySelector(".job-name").textContent = g.name;
       const n = Object.keys(g.terms).length;
-      li.querySelector(".job-sub").textContent = `${n} 条术语${g.notes ? " · 有补充信息" : ""}`;
+      li.querySelector(".job-sub").textContent =
+        [g.notes ? g.notes.split("\n")[0].slice(0, 40) : "没有背景说明", n ? `${n} 条固定译法` : ""].filter(Boolean).join(" · ");
       btn.addEventListener("click", () => open(g.id));
       list.append(li);
     }
@@ -74,10 +75,10 @@
   }
 
   function open(id) {
-    if (dirty && !window.confirm("当前术语表有未保存的修改，确定放弃吗？")) return;
+    if (dirty && !window.confirm("当前背景资料有未保存的修改，确定放弃吗？")) return;
     const g = glossaries.find((x) => x.id === id) || null;
     current = g ? g.id : null;
-    title.textContent = g ? g.name : "新建术语表";
+    title.textContent = g ? g.name : "新建背景资料";
     nameInput.value = g ? g.name : "";
     notesInput.value = g ? g.notes : "";
     terms.replaceChildren();
@@ -192,7 +193,7 @@
   });
 
   deleteBtn.addEventListener("click", async () => {
-    if (!current || !window.confirm("确定删除这个术语表吗？已经选用它的任务重新翻译时需要另选。")) return;
+    if (!current || !window.confirm("确定删除这份背景资料吗？已经选用它的任务重新翻译时需要另选。")) return;
     try {
       const res = await fetch(`/api/glossaries/${encodeURIComponent(current)}`, { method: "DELETE" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);

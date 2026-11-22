@@ -80,11 +80,11 @@ def test_prompt_contains_relevant_terms_and_notes():
     system = tr.systems[0]
     assert "こより → 可萝莉" in system and "みこ" not in system
     assert "助手くん（保留原文" in system
-    assert "补充信息" in system and "主播自称こより" in system
+    assert "背景说明" in system and "主播自称こより" in system
 
 
 def test_translation_config_errors_on_missing_glossary():
-    with pytest.raises(PipelineError, match="找不到术语表"):
+    with pytest.raises(PipelineError, match="找不到背景资料"):
         translation_config({"glossary": {}}, ["nope"], "")
     gs.save(gs.Glossary(name="g", terms={"a": "b"}, notes="n"))
     tcfg = translation_config({"glossary": {"c": "d"}, "notes": "全局"}, ["g"], "本期")
@@ -104,19 +104,19 @@ def test_job_changes_context_retranslates(fake_cfg, sample_video):
     assert "translate" not in job.state.completed and "segment" in job.state.completed
 
 
-def test_cli_glossary_commands(tmp_path):
+def test_cli_context_commands(tmp_path):
     runner = CliRunner()
-    assert "还没有术语表" in runner.invoke(main, ["glossary", "list"]).output
-    assert runner.invoke(main, ["glossary", "set", "主播", "こより", "可萝莉"]).exit_code == 0
-    assert runner.invoke(main, ["glossary", "notes", "主播", "VTuber 直播"]).exit_code == 0
+    assert "还没有背景资料" in runner.invoke(main, ["context", "list"]).output
+    assert runner.invoke(main, ["context", "set", "主播", "こより", "可萝莉"]).exit_code == 0
+    assert runner.invoke(main, ["context", "notes", "主播", "VTuber 直播"]).exit_code == 0
     csv = tmp_path / "t.csv"
     csv.write_text("助手くん,助手君\nホロライブ,Hololive\n", encoding="utf-8")
-    assert "导入 2 条，共 3 条" in runner.invoke(main, ["glossary", "import", "主播", str(csv)]).output
-    out = runner.invoke(main, ["glossary", "show", "主播"]).output
+    assert "导入 2 条，共 3 条" in runner.invoke(main, ["context", "import", "主播", str(csv)]).output
+    out = runner.invoke(main, ["context", "show", "主播"]).output
     assert "こより → 可萝莉" in out and "VTuber 直播" in out
-    assert runner.invoke(main, ["glossary", "unset", "主播", "こより"]).exit_code == 0
-    assert "2 条术语" in runner.invoke(main, ["glossary", "list"]).output
-    assert runner.invoke(main, ["glossary", "delete", "主播", "--yes"]).exit_code == 0
+    assert runner.invoke(main, ["context", "unset", "主播", "こより"]).exit_code == 0
+    assert "VTuber 直播  · 2 条固定译法" in runner.invoke(main, ["context", "list"]).output
+    assert runner.invoke(main, ["context", "delete", "主播", "--yes"]).exit_code == 0
     assert gs.list_all() == []
 
 
@@ -125,10 +125,12 @@ def test_cli_translate_with_glossary(tmp_path):
     srt = tmp_path / "a.srt"
     srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
     runner = CliRunner()
-    res = runner.invoke(main, ["translate", str(srt), "-t", "zh", "--translator", "fake", "-g", "g"])
+    res = runner.invoke(main, ["translate", str(srt), "-t", "zh", "--translator", "fake", "-x", "g"])
+    assert res.exit_code == 0, res.output
+    res = runner.invoke(main, ["translate", str(srt), "-t", "zh", "--translator", "fake", "-g", "g"])  # 旧选项
     assert res.exit_code == 0, res.output
     res = runner.invoke(main, ["translate", str(srt), "-t", "zh", "--translator", "fake", "-g", "missing"])
-    assert res.exit_code != 0 and "找不到术语表" in res.output
+    assert res.exit_code != 0 and "找不到背景资料" in res.output
 
 
 def test_prompt_marks_source_as_uncertain_asr():
@@ -138,3 +140,10 @@ def test_prompt_marks_source_as_uncertain_asr():
     plain = Capture(source_kind="subtitle")
     plain.translate(["a"], "zh")
     assert "已有的字幕" in plain.systems[0] and "自动语音识别" not in plain.systems[0]
+
+
+def test_legacy_glossary_command_still_works():
+    runner = CliRunner()
+    assert runner.invoke(main, ["glossary", "notes", "旧", "说明"]).exit_code == 0
+    assert "旧  说明" in runner.invoke(main, ["glossary", "list"]).output
+    assert "glossary" not in runner.invoke(main, ["--help"]).output

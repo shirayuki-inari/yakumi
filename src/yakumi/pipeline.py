@@ -11,7 +11,7 @@
     sentences.json   断句结果：句子（翻译单位）及其词区间
     aligned.json     字幕条（显示单位），每条带所属句子的编号 group
     translated.json  带译文的字幕条（Web 编辑字幕时直接修改它）
-    glossary.json    翻译时实际用到的术语和补充信息（记录用）
+    glossary.json    翻译时实际用到的固定译法和背景说明（记录用）
     subtitles.<fmt>  导出的字幕；另有 preview.vtt 供网页预览
     output.mp4       烧录字幕后的视频
     state.json       任务状态
@@ -214,7 +214,7 @@ class Job:
         self.save()
 
     def set_translation_context(self, glossaries: list[str], notes: str) -> bool:
-        """更换术语表或补充信息。有变化时返回 True，并让翻译及之后的阶段重跑。"""
+        """更换背景资料或补充说明。有变化时返回 True，并让翻译及之后的阶段重跑。"""
         glossaries, notes = list(glossaries), notes.strip()
         if (self.state.glossaries, self.state.notes) == (glossaries, notes):
             return False
@@ -470,7 +470,7 @@ def _stage_translate(job: Job, cfg: dict[str, Any], report: StageReport) -> None
 
 
 def translation_config(tcfg: dict[str, Any], glossaries: list[str], notes: str) -> dict[str, Any]:
-    """把选用的术语表和补充信息并入 [translate] 配置。找不到术语表时报错。"""
+    """把选用的背景资料和补充说明并入 [translate] 配置。找不到背景资料时报错。"""
     try:
         terms, extra = glossary_store.resolve(tcfg.get("glossary"), glossaries, notes)
     except glossary_store.GlossaryError as exc:

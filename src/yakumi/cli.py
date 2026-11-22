@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import shutil
@@ -68,7 +69,7 @@ def _check_glossaries(ids: tuple[str, ...]) -> list[str]:
         try:
             glossary_store.load(gid)
         except glossary_store.GlossaryError as exc:
-            raise click.ClickException(f"{exc}\n用 yakumi glossary list 查看已有的术语表。") from exc
+            raise click.ClickException(f"{exc}\n用 yakumi context list 查看已有的背景资料。") from exc
     return list(ids)
 
 
@@ -194,10 +195,21 @@ model_option = click.option("--model", default=None, help="翻译使用的模型
 translator_option = click.option("--translator", "translate_provider", default=None, hidden=True)
 source_option = click.option("-s", "--source", default=None, help="原视频语言，如 en、ja；默认自动识别。")
 format_option = click.option("--format", "fmt", type=click.Choice(FORMATS), default=None, help="字幕格式。")
-glossary_option = click.option("-g", "--glossary", "glossaries", multiple=True,
-                               help="翻译时使用的术语表（可以重复指定多个），见 yakumi glossary。")
 notes_option = click.option("--notes", default=None,
-                            help="只对这个视频有效的补充信息，例如主播、节目、人物关系。")
+                            help="只对这个任务有效的补充说明，会写进翻译提示词，例如“这期是第一次 ASMR 直播”。")
+
+
+def context_option(f):
+    """-x / --context 选用背景资料；旧的 -g / --glossary 仍然可用（隐藏），两者合并。"""
+
+    @functools.wraps(f)
+    def wrapper(*args, legacy_contexts=(), **kwargs):
+        kwargs["glossaries"] = tuple(kwargs.get("glossaries") or ()) + tuple(legacy_contexts)
+        return f(*args, **kwargs)
+
+    wrapper = click.option("-g", "--glossary", "legacy_contexts", multiple=True, hidden=True)(wrapper)
+    return click.option("-x", "--context", "glossaries", multiple=True,
+                        help="翻译时使用的背景资料（可以重复指定多个），见 yakumi context。")(wrapper)
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -218,7 +230,7 @@ def main(ctx: click.Context, config: str | None) -> None:
 @click.option("--bilingual/--mono", default=None, help="双语字幕（译文 + 原文）。")
 @click.option("--burn", is_flag=True, help="把字幕烧录进视频。")
 @format_option
-@glossary_option
+@context_option
 @notes_option
 @asr_option
 @model_option
@@ -267,7 +279,7 @@ def transcribe(ctx, media_file: Path, source, fmt, asr_provider, out_dir, force)
 @source_option
 @click.option("--bilingual/--mono", default=None, help="双语字幕（译文 + 原文）。")
 @format_option
-@glossary_option
+@context_option
 @notes_option
 @model_option
 @translator_option
@@ -339,37 +351,44 @@ def burn(ctx, video: Path, subtitles: Path, output):
 
 
 @main.group()
-def glossary():
-    """管理术语表（保存在 ~/.config/yakumi/glossaries/，可以在多个任务里复用）。"""
+def context():
+    """管理背景资料：按频道、节目保存的翻译背景，可以在多个任务里复用。
+
+    \b
+    每份背景资料包含：
+      背景说明  一两句话说明这是谁的什么内容，原样写进翻译提示词（核心）
+      固定译法  可选，原文 → 译文，只在必须固定译法时添加
+    保存在 ~/.config/yakumi/glossaries/，翻译时用 -x 选用。
+    """
 
 
-def _load_glossary(name: str) -> glossary_store.Glossary:
+def _load_context(name: str) -> glossary_store.Glossary:
     try:
         return glossary_store.load(glossary_store.glossary_id(name))
     except glossary_store.GlossaryError as exc:
         raise click.ClickException(str(exc)) from exc
 
 
-@glossary.command("list")
-def glossary_list():
-    """列出所有术语表。"""
+@context.command("list")
+def context_list():
+    """列出所有背景资料。"""
     items = glossary_store.list_all()
     if not items:
-        click.echo(f"还没有术语表。用 yakumi glossary set <名称> <原文> <译文> 创建，保存在 {glossary_store.glossaries_dir()}")
+        click.echo("还没有背景资料。用 yakumi context notes <名称> <背景说明> 创建，"
+                   f"保存在 {glossary_store.glossaries_dir()}")
     for g in items:
-        notes = g.notes.splitlines()[0][:30] if g.notes else ""
-        click.echo(f"{g.id}  {len(g.terms)} 条术语" + (f"  {notes}" if notes else ""))
+        notes = g.notes.splitlines()[0][:30] if g.notes else "（没有背景说明）"
+        click.echo(f"{g.id}  {notes}" + (f"  · {len(g.terms)} 条固定译法" if g.terms else ""))
 
 
-@glossary.command("show")
+@context.command("show")
 @click.argument("name")
-def glossary_show(name):
-    """显示术语表内容。"""
-    g = _load_glossary(name)
+def context_show(name):
+    """显示一份背景资料。"""
+    g = _load_context(name)
     click.echo(f"# {g.name}（{glossary_store.path_of(g.id)}）")
-    if g.notes:
-        click.echo(f"\n补充信息：\n{g.notes}")
-    click.echo(f"\n术语（{len(g.terms)} 条）：")
+    click.echo(f"\n背景说明：\n{g.notes or '（无）'}")
+    click.echo(f"\n固定译法（{len(g.terms)} 条）：")
     for k, v in g.terms.items():
         click.echo(f"  {k} → {v or '（保留原文）'}")
 
@@ -384,66 +403,71 @@ def _get_or_new(name: str) -> glossary_store.Glossary:
             raise click.ClickException(str(exc)) from exc
 
 
-@glossary.command("set")
+@context.command("notes")
+@click.argument("name")
+@click.argument("text", required=False)
+@click.option("-f", "--file", "file", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="从文件读取背景说明。")
+def context_notes(name, text, file):
+    """设置背景说明（背景资料不存在时自动创建）：主播、节目、人物关系、粉丝名等，原样写进翻译提示词。"""
+    if file:
+        text = file.read_text(encoding="utf-8")
+    if text is None:
+        raise click.ClickException("请提供背景说明文字，或用 -f 指定文件")
+    g = _get_or_new(name)
+    g.notes = text.strip()
+    glossary_store.save(g)
+
+
+@context.command("set")
 @click.argument("name")
 @click.argument("source")
 @click.argument("target", default="")
-def glossary_set(name, source, target):
-    """添加或修改一条术语（术语表不存在时自动创建）。译文留空表示保留原文。"""
+def context_set(name, source, target):
+    """添加或修改一条固定译法（背景资料不存在时自动创建）。译文留空表示保留原文。"""
     g = _get_or_new(name)
     g.terms[source.strip()] = target.strip()
     glossary_store.save(g)
     click.echo(f"{g.id}：{source} → {target or '（保留原文）'}")
 
 
-@glossary.command("unset")
+@context.command("unset")
 @click.argument("name")
 @click.argument("source")
-def glossary_unset(name, source):
-    """删除一条术语。"""
-    g = _load_glossary(name)
+def context_unset(name, source):
+    """删除一条固定译法。"""
+    g = _load_context(name)
     if g.terms.pop(source, None) is None:
         raise click.ClickException(f"{g.id} 里没有“{source}”")
     glossary_store.save(g)
 
 
-@glossary.command("notes")
-@click.argument("name")
-@click.argument("text", required=False)
-@click.option("-f", "--file", "file", type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              help="从文件读取补充信息。")
-def glossary_notes(name, text, file):
-    """设置术语表的补充信息（主播、节目、人物关系、口头禅等）。"""
-    if file:
-        text = file.read_text(encoding="utf-8")
-    if text is None:
-        raise click.ClickException("请提供补充信息文字，或用 -f 指定文件")
-    g = _get_or_new(name)
-    g.notes = text.strip()
-    glossary_store.save(g)
-
-
-@glossary.command("import")
+@context.command("import")
 @click.argument("name")
 @click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-def glossary_import(name, file):
-    """从 CSV / TSV / “原文 = 译文” 文本文件导入术语（一行一条，追加到术语表）。"""
+def context_import(name, file):
+    """从 CSV / TSV / “原文 = 译文” 文本文件导入固定译法（一行一条，追加到背景资料）。"""
     g = _get_or_new(name)
     terms = glossary_store.import_terms(file.read_text(encoding="utf-8-sig"))
     g.terms.update(terms)
     glossary_store.save(g)
-    click.echo(f"{g.id}：导入 {len(terms)} 条，共 {len(g.terms)} 条")
+    click.echo(f"{g.id}：导入 {len(terms)} 条，共 {len(g.terms)} 条固定译法")
 
 
-@glossary.command("delete")
+@context.command("delete")
 @click.argument("name")
-@click.confirmation_option(prompt="确定删除这个术语表？")
-def glossary_delete(name):
-    """删除术语表。"""
+@click.confirmation_option(prompt="确定删除这份背景资料？")
+def context_delete(name):
+    """删除一份背景资料。"""
     try:
         glossary_store.delete(glossary_store.glossary_id(name))
     except glossary_store.GlossaryError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+# 旧命令名 yakumi glossary 仍然可用（不在帮助里显示）
+main.add_command(click.Group("glossary", commands=context.commands, hidden=True,
+                             help="旧名称，请改用 yakumi context。"))
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}

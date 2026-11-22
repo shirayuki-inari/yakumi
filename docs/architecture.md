@@ -55,7 +55,7 @@
 
 | 模块 | 职责 |
 | --- | --- |
-| `cli.py` | click 命令：run / transcribe / translate / burn / serve / passwd / jobs / doctor / glossary |
+| `cli.py` | click 命令：run / transcribe / translate / burn / serve / passwd / jobs / doctor / context |
 | `web/` | 网页工作台：`app.py`（路由、任务队列、跨站与 Host 检查）、`templates/`、`static/` |
 | `settings.py` | 网页可修改的配置项（分组、校验、来源），按行写回配置文件并保留注释 |
 | `doctor.py` | 环境与配置检查，命令行 `doctor` 和网页设置页共用 |
@@ -74,7 +74,7 @@
 | `llm.py` | OpenAI 兼容对话客户端：重试、思考档位、OpenRouter 路由、用量统计 |
 | `segment/` | 断句：`llm.py`（LLM 断句与校验映射）、`rules.py`（规则兜底）、`cues.py`（句子 → 字幕条）、`timing.py`（纯文本模式的时间估算） |
 | `translate/` | 翻译：`base.py`（分批、编号、兜底）、`grouped.py`（整句翻译）、`openai_compat.py`、`fake.py` |
-| `glossary.py` | 可复用的术语表（补充信息 + 可选术语），保存在 `~/.config/yakumi/glossaries/` |
+| `glossary.py` | 背景资料（背景说明 + 可选的固定译法），保存在 `~/.config/yakumi/glossaries/`。界面和命令行叫“背景资料” / `context`，代码、文件和配置键沿用 glossary |
 | `subtitle/` | `formats.py`（SRT / VTT / ASS 读写）、`style.py`（中日文字幕标点惯例） |
 | `stats.py` | 把任务统计整理成一行摘要（请求数、兜底次数、费用） |
 
@@ -95,5 +95,5 @@
 ## 测试
 
 - 测试不访问网络：`asr/fake.py` 按绝对时间生成确定的词（`w0 w1 …`），可以精确验证切分与合并；`translate/fake.py` 和 `segment.llm.FakeChat` 让整条流水线离线跑通。
-- `tests/conftest.py` 把 `XDG_CONFIG_HOME`、`XDG_CACHE_HOME` 指向临时目录，测试不会读写真实的配置、术语表和缓存。
+- `tests/conftest.py` 把 `XDG_CONFIG_HOME`、`XDG_CACHE_HOME` 指向临时目录，测试不会读写真实的配置、背景资料和缓存。
 - 需要 ffmpeg 的测试在找不到 ffmpeg 时自动跳过；Silero VAD 的测试在没有 onnxruntime 时跳过。

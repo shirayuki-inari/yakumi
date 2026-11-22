@@ -126,23 +126,23 @@
       </div>
     </div>
     <details class="context-options" data-context>
-      <summary>{{ icon("book-open", 14) }}<span>术语表与补充信息</span><span class="context-count" data-context-count></span></summary>
+      <summary>{{ icon("book-open", 14) }}<span>背景资料与补充说明</span><span class="context-count" data-context-count></span></summary>
       <div class="context-body">
         <div>
-          <span class="field-label">术语表</span>
+          <span class="field-label">背景资料</span>
           {% if glossaries %}
           <div class="chip-picker" data-glossary-picker>
             {% for g in glossaries %}
-            <label class="chip-option"><input type="checkbox" name="glossaries" value="{{ g.id }}" /><span>{{ g.name }}</span><small>{{ g.count }}</small></label>
+            <label class="chip-option"{% if g.summary %} title="{{ g.summary }}"{% endif %}><input type="checkbox" name="glossaries" value="{{ g.id }}" /><span>{{ g.name }}</span>{% if g.count %}<small title="固定译法">{{ g.count }}</small>{% endif %}</label>
             {% endfor %}
           </div>
           {% else %}
-          <p class="field-hint flush">还没有术语表。<a href="{{ url_for('glossaries_page') }}">新建一个</a>，保存人名、专有名词的固定译法，可以在多个视频里复用。</p>
+          <p class="field-hint flush">还没有背景资料。<a href="{{ url_for('context_page') }}">新建一份</a>：用一两句话说明主播、节目、粉丝名等，翻译时写进提示词，可以在多个视频里复用。</p>
           {% endif %}
         </div>
         <label class="context-notes">
-          <span class="field-label">补充信息（只对这个任务有效）</span>
-          <textarea name="notes" rows="3" maxlength="4000" placeholder="例如：主播称呼粉丝为“助手くん”；这期是第一次 ASMR 直播。"></textarea>
+          <span class="field-label">补充说明（只对这个任务有效，也会写进提示词）</span>
+          <textarea name="notes" rows="3" maxlength="4000" placeholder="例如：这期是第一次 ASMR 直播；嘉宾是某某。"></textarea>
         </label>
       </div>
     </details>

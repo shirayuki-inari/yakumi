@@ -1,23 +1,23 @@
 {% extends "base.html" %}
-{% block title %}术语表 · Yakumi{% endblock %}
+{% block title %}背景资料 · Yakumi{% endblock %}
 {% block content %}
 <div class="job-header">
   <a class="text-button back-link" href="{{ url_for('index') }}">{{ icon("arrow-left", 14) }}<span>全部任务</span></a>
-  <div class="job-title-row"><h1 class="job-title">术语表</h1></div>
-  <p class="job-sub">保存人名、专有名词的固定译法和节目背景，上传视频时选用，可以在多个视频里复用。</p>
+  <div class="job-title-row"><h1 class="job-title">背景资料</h1></div>
+  <p class="job-sub">按频道、节目保存翻译背景，上传视频时选用，可以在多个视频里复用。背景说明会原样写进翻译提示词，帮助模型认出被识别写错的人名、统一译法；固定译法可选。</p>
 </div>
 
 <div class="workspace glossary-workspace">
   <aside class="controls">
     <div class="control-panel">
       <div class="panel-heading">
-        <h2>全部术语表</h2>
+        <h2>全部背景资料</h2>
         <button type="button" class="text-button" data-new-glossary>{{ icon("plus", 14) }}<span>新建</span></button>
       </div>
       <ul class="job-list glossary-list" data-glossary-list></ul>
       <div class="empty-preview empty-jobs" data-empty-glossaries hidden>
         {{ icon("book-open", 28) }}
-        <p>还没有术语表</p>
+        <p>还没有背景资料</p>
       </div>
       <p class="field-hint">文件保存在 <code>{{ glossaries_dir }}</code>，也可以直接编辑。</p>
     </div>
@@ -25,7 +25,7 @@
 
   <section class="control-panel glossary-editor" data-editor hidden>
     <div class="panel-heading">
-      <h2 data-editor-title>新建术语表</h2>
+      <h2 data-editor-title>新建背景资料</h2>
       <span class="edited-badge" data-glossary-dirty hidden>有未保存的修改</span>
     </div>
 
@@ -35,18 +35,19 @@
     </label>
 
     <label class="editor-field">
-      <span class="field-label">补充信息</span>
-      <textarea rows="4" maxlength="4000" data-field="notes" placeholder="一两句话说明这是谁的什么内容，例如：某某组合成员某某的游戏直播，粉丝名为“××”。模型会据此认出被识别写错的名字，通常不需要再逐条列术语。"></textarea>
+      <span class="field-label">背景说明</span>
+      <textarea rows="4" maxlength="4000" data-field="notes" placeholder="一两句话说明这是谁的什么内容，例如：某某组合成员某某的游戏直播，粉丝名为“××”。模型会据此认出被识别写错的名字，通常不需要再逐条添加固定译法。"></textarea>
+      <span class="field-hint">会原样写进每次翻译的提示词。</span>
     </label>
 
     <div class="editor-field">
       <div class="terms-heading">
-        <span class="field-label">术语（可选） <span data-term-count></span></span>
-        <span class="field-hint flush">只在需要固定译法时添加；译文留空表示保留原文</span>
+        <span class="field-label">固定译法（可选） <span data-term-count></span></span>
+        <span class="field-hint flush">只在必须固定译法时添加，例如作品名、官方译名；原文里出现时才会放进提示词，译文留空表示保留原文</span>
       </div>
       <div class="terms" data-terms></div>
       <div class="terms-actions">
-        <button type="button" class="text-button" data-add-term>{{ icon("plus", 14) }}<span>添加术语</span></button>
+        <button type="button" class="text-button" data-add-term>{{ icon("plus", 14) }}<span>添加固定译法</span></button>
       </div>
       <details class="bulk-add">
         <summary>批量添加</summary>
@@ -65,7 +66,7 @@
   <section class="control-panel glossary-editor empty-editor" data-editor-empty>
     <div class="empty-preview">
       {{ icon("book-open", 28) }}
-      <p>选择左侧的术语表进行编辑，或者新建一个</p>
+      <p>选择左侧的背景资料进行编辑，或者新建一份</p>
     </div>
   </section>
 </div>
@@ -74,7 +75,7 @@
     <input class="text-input" type="text" data-term="source" placeholder="原文" aria-label="原文" />
     <span class="term-arrow" aria-hidden="true">→</span>
     <input class="text-input" type="text" data-term="target" placeholder="译文（留空保留原文）" aria-label="译文" />
-    <button type="button" class="icon-button" data-remove-term aria-label="删除这条术语">{{ icon("x", 16) }}</button>
+    <button type="button" class="icon-button" data-remove-term aria-label="删除这条固定译法">{{ icon("x", 16) }}</button>
   </div>
 </template>
 <template data-item-template>
@@ -87,4 +88,4 @@
 </template>
 <script type="application/json" id="glossary-data">{{ glossaries_json|safe }}</script>
 {% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='glossaries.js') }}"></script>{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='context.js') }}"></script>{% endblock %}

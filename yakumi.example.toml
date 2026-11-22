@@ -43,7 +43,7 @@ routing = "default"
 unit = "sentence"
 batch_sentences = 15     # 整句翻译时每批的句子数（每批另外限制在 40 条字幕以内）
 # style = "轻松口语化，保留网络流行语"
-# 对所有任务生效的补充信息（可选）。按频道区分的背景信息建议放进术语表，见 yakumi glossary
+# 全局背景说明（可选）：对所有任务生效，原样写进翻译提示词。按频道、节目区分的放进背景资料，见 yakumi context
 notes = ""
 
 # 本地 Ollama 示例（不需要 api_key）：
@@ -56,8 +56,8 @@ notes = ""
 # order = ["google-ai-studio"]
 # allow_fallbacks = true
 
-# 对所有任务生效的术语：原文 = 译文。可复用的术语表保存在 ~/.config/yakumi/glossaries/，
-# 用 yakumi glossary 或网页“术语表”管理，运行时用 -g 选用，会与这里的术语合并（术语表优先）
+# 全局固定译法：原文 = 译文，对所有任务生效。可复用的背景资料保存在 ~/.config/yakumi/glossaries/，
+# 用 yakumi context 或网页“背景资料”管理，运行时用 -x 选用，会与这里合并（背景资料优先）
 [translate.glossary]
 # "Yakumi" = "Yakumi"
 

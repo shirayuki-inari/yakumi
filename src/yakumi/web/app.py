@@ -1,4 +1,4 @@
-"""网页工作台：上传视频或字幕、查看进度、校对字幕、重新生成与下载，以及术语表、设置和环境检查。
+"""网页工作台：上传视频或字幕、查看进度、校对字幕、重新生成与下载，以及背景资料、设置和环境检查。
 
 任务在进程内的单线程池里排队执行，状态全部来自任务目录的 state.json，
 不需要数据库或消息队列。
@@ -349,18 +349,20 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
         return data
 
     def glossary_summaries() -> list[dict[str, Any]]:
-        return [{"id": g.id, "name": g.name, "count": len(g.terms)} for g in glossary_store.list_all()]
+        return [{"id": g.id, "name": g.name, "count": len(g.terms),
+                 "summary": g.notes.strip().splitlines()[0][:80] if g.notes.strip() else ""}
+                for g in glossary_store.list_all()]
 
     def to_json(data: Any) -> str:
         return json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
 
     def check_glossaries(ids: Any) -> list[str]:
         if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
-            raise ValueError("术语表参数格式不正确")
+            raise ValueError("背景资料参数格式不正确")
         known = {g["id"] for g in glossary_summaries()}
         missing = [i for i in ids if i not in known]
         if missing:
-            raise ValueError(f"找不到术语表：{'、'.join(missing)}")
+            raise ValueError(f"找不到背景资料：{'、'.join(missing)}")
         return ids
 
     # ---- 页面 ----------------------------------------------------------
@@ -389,13 +391,17 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
             return render_template("settings.html", settings_json="null", config_error=str(exc))
         return render_template("settings.html", settings_json=to_json(data), config_error=None)
 
-    @app.get("/glossaries")
-    def glossaries_page():
+    @app.get("/context")
+    def context_page():
         items = [g.to_dict() for g in glossary_store.list_all()]
-        return render_template("glossaries.html", glossaries=items, glossaries_json=to_json(items),
+        return render_template("context.html", glossaries=items, glossaries_json=to_json(items),
                                glossaries_dir=str(glossary_store.glossaries_dir()))
 
-    # ---- 术语表 API -----------------------------------------------------
+    @app.get("/glossaries")
+    def legacy_glossaries_page():  # 旧地址
+        return redirect(url_for("context_page"), 301)
+
+    # ---- 背景资料 API（沿用 glossaries 的路径）--------------------------
     @app.get("/api/glossaries")
     def api_glossaries():
         return jsonify([g.to_dict() for g in glossary_store.list_all()])
@@ -413,7 +419,7 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
         try:
             g = _glossary_from_body()
             if glossary_store.path_of(g.id).exists():
-                return jsonify(error=f"已经有名为“{g.name}”的术语表"), 409
+                return jsonify(error=f"已经有名为“{g.name}”的背景资料"), 409
             glossary_store.save(g)
         except glossary_store.GlossaryError as exc:
             return jsonify(error=str(exc)), 400
@@ -672,7 +678,7 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
 
     @app.post("/api/jobs/<job_id>/retranslate")
     def api_retranslate(job_id: str):
-        """更换术语表和补充信息后重新翻译（会覆盖校对过的译文）。"""
+        """更换背景资料和补充说明后重新翻译（会覆盖校对过的译文）。"""
         with runner.reserve(job_id) as reservation:
             job = load(job_id)
             if not job.state.target_lang:
@@ -685,10 +691,10 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
                 return jsonify(error=str(exc)), 400
             notes = body.get("notes", job.state.notes)
             if not isinstance(notes, str):
-                return jsonify(error="补充信息格式不正确"), 400
+                return jsonify(error="补充说明格式不正确"), 400
             job.migrate()
             job.state.glossaries, job.state.notes = glossaries, notes.strip()[:4000]
-            # 术语表的内容可能改过，即使选择没变也重新翻译。
+            # 背景资料的内容可能改过，即使选择没变也重新翻译。
             runner.submit(job, reservation, from_stage="translate")
         return jsonify(view(load(job_id)))
 

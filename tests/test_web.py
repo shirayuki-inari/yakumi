@@ -115,7 +115,8 @@ def test_upload_validation(app):
 
 def test_glossary_api_and_page(app):
     client = app.test_client()
-    assert "术语表" in client.get("/glossaries").get_data(as_text=True)
+    assert "背景说明" in client.get("/context").get_data(as_text=True)
+    assert client.get("/glossaries").headers["Location"].endswith("/context")  # 旧地址
     resp = client.post("/api/glossaries", json={"name": "主播", "notes": "VTuber",
                                                 "terms": [{"source": "こより", "target": "可萝莉"},
                                                           {"source": " ", "target": "空的会被忽略"}]})

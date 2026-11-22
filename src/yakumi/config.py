@@ -50,7 +50,7 @@ DEFAULTS: dict[str, Any] = {
         "unit": "sentence",  # sentence（整句翻译，译文按字幕条分段）| cue（逐条翻译）
         "batch_sentences": 15,  # 整句翻译时每批的句子数（每批另外限制在 40 条字幕以内）
         "style": "",
-        "notes": "",  # 对所有任务生效的补充信息；按频道区分的信息放进术语表
+        "notes": "",  # 对所有任务生效的背景说明；按频道、节目区分的放进背景资料（yakumi context）
         "glossary": {},
     },
     "segment": {
