@@ -46,6 +46,7 @@ def test_upload_process_edit_download(app, sample_video):
     assert state["name"] == "我的视频.mp4"
     assert state["files"]["subtitles"] and state["files"]["video"] is None
     assert state["summary"].startswith("识别：词级时间戳")
+    assert state["report"]["sections"][0]["label"] == "识别" and state["report"]["cost"].startswith("$")
 
     page = client.get(f"/jobs/{job_id}").get_data(as_text=True)
     assert "我的视频.mp4" in page and "字幕校对" in page

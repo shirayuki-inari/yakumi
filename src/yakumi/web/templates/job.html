@@ -12,16 +12,31 @@
 
 <div class="workspace">
   <aside class="controls" aria-labelledby="settings-title">
+    <section class="control-panel status-panel" data-status-box aria-labelledby="status-title">
+      <div class="status-head">
+        <span class="status-icon" data-status-icon aria-hidden="true">
+          {{ icon("loader-circle", 18, "spin icon-busy") }}{{ icon("circle-check", 18, "icon-done") }}{{ icon("circle-x", 18, "icon-error") }}{{ icon("clock", 18, "icon-wait") }}
+        </span>
+        <h2 class="status-title" id="status-title" data-status-title aria-live="polite"></h2>
+        <span class="status-pct" data-status-pct></span>
+      </div>
+      <p class="status-detail" data-status-detail></p>
+      <div class="progress" data-progress><span data-progress-bar></span></div>
+
+      <details class="status-more" data-steps-box>
+        <summary>{{ icon("chevron-right", 14) }}<span data-steps-summary>处理步骤</span></summary>
+        <ol class="steps" data-steps aria-label="处理步骤"></ol>
+      </details>
+
+      <details class="status-more" data-report-box hidden>
+        <summary>{{ icon("chevron-right", 14) }}<span>处理详情</span><span class="report-cost" data-report-cost></span></summary>
+        <dl class="report" data-report></dl>
+      </details>
+      <p class="notice error" data-error hidden></p>
+    </section>
+
     <div class="control-panel">
       <div class="panel-heading"><h2 id="settings-title">导出设置</h2></div>
-
-      <div class="status-box" data-status-box>
-        <div class="progress"><span data-progress-bar></span></div>
-        <p class="progress-text" data-progress-text></p>
-        <ol class="steps" data-steps aria-label="处理步骤"></ol>
-        <p class="field-hint summary" data-summary hidden></p>
-      </div>
-      <p class="notice error" data-error hidden></p>
 
       <div class="display-options">
         {% if job.target_lang %}

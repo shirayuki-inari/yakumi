@@ -6,7 +6,7 @@ from yakumi import pipeline
 from yakumi.align import AlignError, NoopAligner, check_alignment, create_aligner
 from yakumi.asr.types import Word
 from yakumi.pipeline import Job, run
-from yakumi.stats import format_stats
+from yakumi.stats import format_stats, stats_report
 
 
 def test_noop_and_factory():
@@ -56,3 +56,18 @@ def test_format_stats():
                          "translate_reasoning_tokens": 52300})
     assert text == ("识别：词级时间戳，3 个窗口，3 次请求；翻译：45 次请求，思考档位 medium，思考 52.3k token；"
                     "费用 $0.4900")
+
+
+def test_stats_report_sections():
+    assert stats_report({}) is None
+    report = stats_report({"mode": "text", "windows": 2, "asr_requests": 3, "asr_failed": 1, "asr_cost": 0.1,
+                           "translate_requests": 4, "translate_unit": "sentence", "translate_cost": 0.05,
+                           "translate_split_retries": 2, "translate_cost_unknown": 1})
+    assert [s["label"] for s in report["sections"]] == ["识别", "翻译"]
+    asr = report["sections"][0]["items"]
+    assert [i["text"] for i in asr] == ["纯文本", "2 个窗口", "3 次请求", "失败 1 次"]
+    assert [i["warn"] for i in asr] == [False, False, False, True]
+    assert report["cost"] == "$0.1500"
+    assert report["cost_notes"] == ["另有 1 次未返回费用", "失败请求的费用未计入"]
+    assert format_stats({"mode": "text", "windows": 2, "asr_requests": 3, "asr_failed": 1, "asr_cost": 0.1}) == (
+        "识别：纯文本，2 个窗口，3 次请求，失败 1 次；费用 $0.1000（失败请求的费用未计入）")

@@ -2,8 +2,14 @@
 (() => {
   let job = JSON.parse(document.getElementById("job-data").textContent);
   const $ = (sel) => document.querySelector(sel);
+  const statusPanel = $("[data-status-box]");
+  const statusTitle = $("[data-status-title]");
+  const statusPct = $("[data-status-pct]");
+  const statusDetail = $("[data-status-detail]");
+  const progress = $("[data-progress]");
   const bar = $("[data-progress-bar]");
-  const progressText = $("[data-progress-text]");
+  const stepsBox = $("[data-steps-box]");
+  const reportBox = $("[data-report-box]");
   const errorBox = $("[data-error]");
   const chip = $("[data-status-chip]");
   const renderBtn = $("[data-render]");
@@ -69,18 +75,11 @@
   function showState() {
     chip.dataset.status = job.status;
     chip.textContent = job.status_label;
-    const pct = Math.round((job.progress || 0) * 100);
-    bar.style.width = `${job.status === "done" ? 100 : pct}%`;
-    if (job.status === "done") progressText.textContent = "已完成，可以校对字幕并下载";
-    else if (job.status === "error") progressText.textContent = job.message || "处理失败";
-    else if (job.status === "awaiting_review") progressText.textContent = `${job.message}，审核后继续翻译`;
-    else progressText.textContent = `${job.message || "排队中"} · ${pct}%`;
-    const summary = $("[data-summary]");
-    summary.textContent = job.summary || "";
-    summary.hidden = !job.summary || busy();
+    showStatus();
+    showSteps();
+    showReport();
     errorBox.hidden = job.status !== "error" || !job.error;
     errorBox.textContent = job.error || "";
-    showSteps();
     setEditorBusy();
     renderBtn.querySelector("span").textContent = job.status === "error" ? "继续处理" : "保存并生成";
     for (const kind of ["subtitles", "video"]) {
@@ -178,19 +177,103 @@
     }
   }
 
-  // 步骤条：已完成、进行中、失败、未开始
+  // 处理进度：一行标题说明现在在做什么，下面一行补充说明；步骤和统计收进可展开的区域
+  function showStatus() {
+    const steps = job.steps || [];
+    const index = steps.findIndex((step) => step.status === "active" || step.status === "error");
+    const current = steps[index];
+    const pct = Math.round((job.progress || 0) * 100);
+    const position = current && steps.length > 1 ? `第 ${index + 1}/${steps.length} 步` : "";
+    let state, title, detail;
+    let showBar = false;
+    if (job.status === "running" && current) {
+      state = "busy";
+      title = job.message || current.label;
+      // 消息不以步骤名开头时（例如“探测识别能力”），补上步骤名
+      detail = job.message && !job.message.startsWith(current.label) ? `${position} · ${current.label}` : position;
+      showBar = true;
+    } else if (busy()) {
+      state = "busy";
+      title = "排队中";
+      detail = "马上开始处理";
+      showBar = true;
+    } else if (job.status === "awaiting_review") {
+      state = "wait";
+      title = "等待术语审核";
+      detail = job.message ? `${job.message}。审核后继续翻译` : "审核后继续翻译";
+    } else if (job.status === "error") {
+      state = "error";
+      title = current ? `${current.label}失败` : "处理失败";
+      detail = "点击“继续处理”从失败的步骤重试";
+    } else {
+      state = "done";
+      title = "已完成";
+      detail = "可以校对字幕并下载";
+    }
+    statusPanel.dataset.state = state;
+    statusTitle.textContent = title;
+    statusTitle.title = title;
+    statusDetail.textContent = detail;
+    statusPct.textContent = showBar && job.status === "running" ? `${pct}%` : "";
+    progress.hidden = !showBar;
+    bar.style.width = `${job.status === "running" ? pct : 0}%`;
+  }
+
   const STEP_TEXT = { done: "已完成", active: "进行中", error: "失败", todo: "未开始" };
   function showSteps() {
     const steps = job.steps || [];
-    stepsList.hidden = steps.length < 2;
+    // 全部完成时步骤没有参考价值，收起来
+    stepsBox.hidden = steps.length < 2 || (job.status === "done" && !busy());
+    const done = steps.filter((step) => step.status === "done").length;
+    stepsBox.querySelector("[data-steps-summary]").textContent = `全部步骤（已完成 ${done}/${steps.length}）`;
     stepsList.replaceChildren(
       ...steps.map((step) => {
         const li = document.createElement("li");
         li.className = `step ${step.status}`;
-        li.textContent = step.label;
-        li.title = `${step.label}：${STEP_TEXT[step.status] || ""}`;
-        if (step.status === "active") li.setAttribute("aria-current", "step");
+        const label = document.createElement("span");
+        label.textContent = step.label;
+        li.append(label);
+        if (step.status === "active" || step.status === "error") {
+          const tag = document.createElement("span");
+          tag.className = "step-state";
+          tag.textContent = STEP_TEXT[step.status];
+          li.append(tag);
+          if (step.status === "active") li.setAttribute("aria-current", "step");
+        } else {
+          li.title = STEP_TEXT[step.status] || "";
+        }
         return li;
+      }),
+    );
+  }
+
+  // 处理详情：每个阶段一行，费用单独一行
+  function showReport() {
+    const report = job.report;
+    reportBox.hidden = !report || busy();
+    if (!report) return;
+    $("[data-report-cost]").textContent = report.cost;
+    const list = $("[data-report]");
+    const lines = report.sections.map((section) => [section.label, section.items, []]);
+    lines.push(["费用", [{ text: report.cost }], report.cost_notes]);
+    list.replaceChildren(
+      ...lines.flatMap(([label, items, notes]) => {
+        const dt = document.createElement("dt");
+        dt.textContent = label;
+        const dd = document.createElement("dd");
+        for (const item of items) {
+          const span = document.createElement("span");
+          span.className = item.warn ? "report-item warn" : "report-item";
+          span.textContent = item.text;
+          dd.append(span);
+        }
+        for (const note of notes) {
+          const small = document.createElement("small");
+          small.className = "report-note";
+          small.textContent = note;
+          dd.append(small);
+        }
+        return [dt, dd];
       }),
     );
   }

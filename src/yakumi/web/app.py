@@ -37,7 +37,7 @@ from ..config import ConfigError, load_config
 from ..doctor import local_checks, online_checks, setup_problems
 from ..files import read_json, write_json
 from ..models import STAGES, JobState, Segment, segments_from_list
-from ..stats import format_stats
+from ..stats import format_stats, stats_report
 from ..pipeline import STAGE_LABELS, Job, JobBusyError, PipelineError, enabled_stages, first_stage, run
 from ..subtitle.formats import FORMATS, parse_srt
 from ..terms import MODES as TERM_MODES, sentences_from_cues
@@ -323,7 +323,7 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
                 with Job.lock(workspace, state.id):
                     job = Job.load(workspace, state.id, migrate=False)
                     if job.state.status in ("running", "pending"):
-                        job.state.status, job.state.error = "error", "服务重启，任务已中断，可以点击“保存并生成”继续"
+                        job.state.status, job.state.error = "error", "服务重启，任务已中断，可以点击“继续处理”接着处理"
                         job.save()
             except JobBusyError:
                 continue
@@ -341,6 +341,7 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
             data["name"] = json.loads(meta.read_text(encoding="utf-8")).get("name") or data["name"]
         data["busy"] = runner.busy(job.state.id)
         data["summary"] = format_stats(job.state.stats)
+        data["report"] = stats_report(job.state.stats)
         review = term_review.load_review(job.dir) if job.state.term_mode != "off" else None
         data["terms"] = ({**review.summary(), "finished": review.finished} if review else None)
         data["files"] = {

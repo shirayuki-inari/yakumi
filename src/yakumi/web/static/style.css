@@ -826,15 +826,6 @@ textarea::placeholder {
   padding: 20px 14px;
   margin: -20px -14px;
 }
-.status-box {
-  margin-bottom: 4px;
-}
-.summary {
-  margin-top: 6px;
-}
-.display-options {
-  padding-top: 12px;
-}
 .format-field {
   margin-top: 12px;
 }
@@ -1284,16 +1275,16 @@ textarea::placeholder {
     grid-template-columns: minmax(0, 1fr);
     gap: 16px;
   }
-  .preview-panel {
-    grid-row: 1;
-  }
+  /* 单栏时拆开侧栏：处理状态排在最前，接着是预览和校对，其余面板在后 */
   .controls {
-    grid-row: 2;
-    position: static;
-    max-height: none;
-    overflow: visible;
-    padding: 0;
-    margin: 0;
+    display: contents;
+  }
+  .workspace .controls > .control-panel {
+    order: 1;
+    margin-top: 0;
+  }
+  .workspace .controls > .status-panel {
+    order: -1;
   }
 }
 @media (max-width: 560px) {
@@ -1442,29 +1433,133 @@ textarea::placeholder {
   background: var(--panel);
 }
 
-/* ---- 任务页：步骤条、无视频、任务操作 ---- */
-.steps {
+/* ---- 任务页：处理进度、无视频、任务操作 ---- */
+.status-panel + .control-panel {
+  margin-top: 16px;
+}
+.status-head {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  margin: 10px 0 0;
-  padding: 0;
-  list-style: none;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.status-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.status-icon svg {
+  display: none;
+}
+.status-panel[data-state="busy"] .icon-busy,
+.status-panel[data-state="done"] .icon-done,
+.status-panel[data-state="error"] .icon-error,
+.status-panel[data-state="wait"] .icon-wait {
+  display: block;
+}
+.status-panel[data-state="done"] .status-icon {
+  color: var(--success-ink);
+}
+.status-panel[data-state="error"] .status-icon {
+  color: var(--danger-ink);
+}
+.status-panel[data-state="wait"] .status-icon {
+  color: var(--notice-ink);
+}
+.status-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.status-pct {
+  flex-shrink: 0;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.status-detail {
+  margin: 4px 0 0 26px;
+  color: var(--ink-3);
   font-size: 12px;
   line-height: 1.6;
+}
+.status-detail:empty {
+  display: none;
+}
+.status-panel .progress {
+  margin-top: 12px;
+}
+
+/* 可展开的“全部步骤”和“处理详情” */
+.status-more {
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.status-more + .status-more {
+  margin-top: 10px;
+}
+.status-more summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-2);
+  font-size: 13px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.status-more summary::-webkit-details-marker {
+  display: none;
+}
+.status-more summary svg {
+  flex-shrink: 0;
+  transition: transform 0.15s;
+}
+.status-more[open] summary svg {
+  transform: rotate(90deg);
+}
+.status-more summary:hover {
+  color: var(--accent);
+}
+.report-cost {
+  margin-left: auto;
+  color: var(--ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.steps {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
   color: var(--ink-3);
 }
 .step {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 10px;
+  min-height: 28px;
 }
 .step::before {
   content: "";
-  width: 7px;
-  height: 7px;
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin-left: 3px;
   border-radius: 50%;
   border: 1.5px solid var(--toggle-off);
+}
+.step-state {
+  margin-left: auto;
+  font-size: 12px;
 }
 .step.done {
   color: var(--ink-2);
@@ -1489,6 +1584,47 @@ textarea::placeholder {
 .step.error::before {
   border-color: var(--danger-ink);
   background: var(--danger-ink);
+}
+
+.report {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px 14px;
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.report dt {
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+/* 条目之间用“·”分隔：分隔符画在条目左侧的间距里，换行后行首那个落在 dd 外面被裁掉 */
+.report dd {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0;
+  color: var(--ink);
+  overflow: hidden;
+}
+.report-item {
+  position: relative;
+  margin-right: 16px;
+}
+.report-item::before {
+  content: "·";
+  position: absolute;
+  left: -16px;
+  width: 16px;
+  text-align: center;
+  color: var(--ink-3);
+}
+.report-item.warn {
+  color: var(--danger-ink);
+}
+.report-note {
+  flex-basis: 100%;
+  color: var(--ink-3);
+  font-size: 12px;
 }
 @keyframes pulse {
   50% {
