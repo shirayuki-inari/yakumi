@@ -38,6 +38,10 @@ dependencies = [
 dev = ["pytest>=8", "pyflakes>=3"]
 # Silero VAD。Termux 上请改用 pkg install python-onnxruntime
 vad = ["numpy>=1.24", "onnxruntime>=1.17"]
+# 下载视频链接（网页上的“视频链接”）
+ytdlp = ["yt-dlp"]
+# 部署到服务器时使用的 WSGI 服务器（yakumi serve 有它时自动使用）
+server = ["waitress>=3"]
 
 [project.scripts]
 yakumi = "yakumi.cli:main"

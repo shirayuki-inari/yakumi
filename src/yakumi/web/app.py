@@ -3,10 +3,12 @@
 任务在进程内的单线程池里排队执行，状态全部来自任务目录的 state.json，
 不需要数据库或消息队列。
 
-工作台没有登录功能，默认只监听本机。为了不被其他网页利用（访问恶意网页时，浏览器可以向
-127.0.0.1 发请求，替你上传文件、发起要花钱的识别和翻译），所有修改类请求都会检查：
-- Origin：浏览器带上的来源必须和本站一致，拒绝跨站请求；
+默认只监听本机、不需要登录；部署到远程服务器时用 yakumi passwd 设置登录密码（见 auth.py）。
+为了不被其他网页利用（访问恶意网页时，浏览器可以向工作台发请求，替你上传文件、发起要花钱的识别和翻译），
+所有修改类请求都会检查：
+- Origin：浏览器带上的来源必须和本站一致，拒绝跨站请求；启用登录后，没有来源信息的修改请求也会被拒绝；
 - Host：只接受 IP 地址、localhost 和配置里 web.allowed_hosts 列出的域名，防止 DNS 重绑定。
+页面另外带有 CSP 等安全响应头。
 """
 
 from __future__ import annotations
@@ -20,14 +22,17 @@ import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlsplit
 
-from flask import Flask, abort, jsonify, render_template, request, send_file, url_for
+from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, session, url_for
+from flask.sessions import SecureCookieSessionInterface
+from werkzeug.middleware.proxy_fix import ProxyFix
 
-from .. import glossary as glossary_store, media, settings as settings_store
+from .. import download as downloader, glossary as glossary_store, media, settings as settings_store
 from ..config import ConfigError, load_config
 from ..doctor import local_checks, online_checks, setup_problems
 from ..files import write_json
@@ -36,6 +41,8 @@ from ..stats import format_stats
 from ..pipeline import STAGE_LABELS, Job, JobBusyError, PipelineError, enabled_stages, first_stage, run
 from ..subtitle.formats import FORMATS, parse_srt
 from ..translate.base import LANG_NAMES, lang_name
+from .auth import Auth
+from .browse import Browser, FileAccessError, make_roots
 
 LANGUAGES = [
     ("zh", "简体中文"), ("zh-TW", "繁體中文"), ("en", "English"), ("ja", "日本語"), ("ko", "한국어"),
@@ -47,6 +54,25 @@ STATUS_LABELS = {"pending": "排队中", "running": "处理中", "done": "已完
 MEDIA_TYPES = {"srt": "application/x-subrip", "ass": "text/x-ssa", "vtt": "text/vtt"}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 SUBTITLE_SUFFIXES = (".srt", ".vtt")
+MAX_SUBTITLE_BYTES = 50 * 1024 * 1024
+PUBLIC_ENDPOINTS = {"login", "static"}
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+       "media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
+       "frame-ancestors 'none'")
+
+
+class _SessionInterface(SecureCookieSessionInterface):
+    """通过 HTTPS 访问（含反向代理转发的 HTTPS）时，登录 Cookie 只走 HTTPS。"""
+
+    def get_cookie_secure(self, app: Flask) -> bool:
+        return request.is_secure
+
+
+def safe_next(target: str | None) -> str:
+    """登录后跳转的地址只能是本站的路径。"""
+    if not target or not target.startswith("/") or target.startswith("//") or "\\" in target:
+        return "/"
+    return target
 
 log = logging.getLogger(__name__)
 
@@ -183,15 +209,80 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
     max_mb = int(web_cfg.get("max_upload_mb", 4096))
     app.config["MAX_CONTENT_LENGTH"] = max_mb * 1024 * 1024 if max_mb > 0 else None
     allowed_hosts = [str(h).lower() for h in web_cfg.get("allowed_hosts", [])]
+    proxies = int(web_cfg.get("proxy_count", 0) or 0)
+    if proxies > 0:  # 反向代理后面：按代理转发的头确定客户端地址、协议和域名
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=proxies, x_proto=proxies, x_host=proxies)  # type: ignore[method-assign]
+
+    auth = Auth(web_cfg)
+    app.extensions["yakumi_auth"] = auth
+    app.secret_key = auth.secret
+    app.session_interface = _SessionInterface()
+    app.config.update(SESSION_COOKIE_NAME="yakumi_session", SESSION_COOKIE_HTTPONLY=True,
+                      SESSION_COOKIE_SAMESITE="Lax",
+                      PERMANENT_SESSION_LIFETIME=timedelta(days=int(web_cfg.get("session_days", 30) or 30)))
+    browser = Browser(make_roots(workspace, list(web_cfg.get("file_roots") or [])))
+
+    def logged_in() -> bool:
+        return not auth.enabled or session.get("auth") == auth.fingerprint
+
+    @app.context_processor
+    def template_globals():
+        return {"auth_enabled": auth.enabled, "logged_in": logged_in()}
 
     @app.before_request
     def guard():
         if not host_allowed(request.host.lower(), allowed_hosts):
             return jsonify(error="不允许的访问地址（Host）。需要用域名访问时，请把它加入配置 web.allowed_hosts"), 403
-        origin = request.headers.get("Origin")
-        if request.method in UNSAFE_METHODS and origin and urlsplit(origin).netloc.lower() != request.host.lower():
-            return jsonify(error="拒绝跨站请求"), 403
+        if request.method in UNSAFE_METHODS:
+            origin = request.headers.get("Origin")
+            if not origin and auth.enabled and request.headers.get("Referer"):
+                parts = urlsplit(request.headers["Referer"])
+                origin = f"{parts.scheme}://{parts.netloc}"
+            if origin and urlsplit(origin).netloc.lower() != request.host.lower():
+                return jsonify(error="拒绝跨站请求"), 403
+            if not origin and auth.enabled:
+                return jsonify(error="拒绝没有来源信息的请求"), 403
+        if request.endpoint not in PUBLIC_ENDPOINTS and not logged_in():
+            if request.method == "GET" and not request.path.startswith("/api/"):
+                return redirect(url_for("login", next=request.full_path.rstrip("?")))
+            return jsonify(error="需要登录", login=url_for("login")), 401
         return None
+
+    @app.after_request
+    def security_headers(resp):
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("X-Frame-Options", "DENY")
+        resp.headers.setdefault("Referrer-Policy", "same-origin")
+        if resp.mimetype == "text/html":
+            resp.headers.setdefault("Content-Security-Policy", CSP)
+        return resp
+
+    @app.route("/login", methods=["GET", "POST"])
+    def login():
+        target = safe_next(request.values.get("next"))
+        if not auth.enabled or logged_in():
+            return redirect(target)
+        error, status = None, 200
+        if request.method == "POST":
+            client = request.remote_addr or "?"
+            wait = auth.wait_seconds(client)
+            if wait:
+                error, status = f"尝试次数太多，请 {max(1, wait // 60)} 分钟后再试", 429
+            elif auth.verify(request.form.get("password", "")):
+                auth.reset(client)
+                session.clear()
+                session["auth"] = auth.fingerprint
+                session.permanent = request.form.get("remember") == "on"
+                return redirect(target)
+            else:
+                auth.record_failure(client)
+                error, status = "密码不正确", 401
+        return render_template("login.html", error=error, next=target), status
+
+    @app.post("/logout")
+    def logout():
+        session.clear()
+        return redirect(url_for("login") if auth.enabled else url_for("index"))
 
     @app.errorhandler(413)
     def too_large(_exc):
@@ -280,7 +371,8 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
         return render_template("index.html", jobs=jobs, languages=LANGUAGES, glossaries=glossary_summaries(),
                                default_target="zh", default_bilingual=bool(sub["bilingual"]),
                                default_format=sub["format"], formats=FORMATS,
-                               problems=setup_problems(runner.cfg))
+                               problems=setup_problems(runner.cfg),
+                               ytdlp=downloader.available(runner.cfg.get("download", {})))
 
     @app.get("/jobs/<job_id>")
     def job_page(job_id: str):
@@ -402,18 +494,37 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
 
     @app.post("/api/jobs")
     def api_create():
-        """创建任务。mode=media：识别视频（target 为空时只识别不翻译）；
-        mode=subtitles：导入 SRT / VTT 字幕翻译或转换格式，可以附带视频用于预览和烧录。"""
+        """创建任务。
+        - mode=media：识别视频（target 为空时只识别不翻译）。视频可以上传，也可以是服务器上的文件（video_ref）；
+        - mode=url：下载视频链接后识别（需要 yt-dlp）；
+        - mode=subtitles：导入 SRT / VTT 字幕翻译或转换格式，可以附带视频用于预览和烧录。
+        服务器文件的引用形如“根目录编号:相对路径”，只能指向允许的目录。
+        """
         mode = request.form.get("mode") or "media"
-        if mode not in ("media", "subtitles"):
+        if mode not in ("media", "url", "subtitles"):
             return bad_request("不支持的任务类型")
-        video, subtitles = uploaded("video"), uploaded("subtitles")
-        if mode == "media" and not video:
+        try:
+            video_ref = browser.file(request.form["video_ref"], "video") if request.form.get("video_ref") else None
+            sub_ref = (browser.file(request.form["subtitles_ref"], "subtitles")
+                       if mode == "subtitles" and request.form.get("subtitles_ref") else None)
+        except FileAccessError as exc:
+            return bad_request(str(exc))
+        video = None if video_ref else uploaded("video")
+        subtitles = None if sub_ref or mode != "subtitles" else uploaded("subtitles")
+        url = ""
+        if mode == "url":
+            video = video_ref = None
+            if not downloader.available(runner.cfg.get("download", {})):
+                return bad_request("服务器没有安装 yt-dlp，无法下载视频链接")
+            try:
+                url = downloader.check_url(request.form.get("url", ""),
+                                           bool(runner.cfg.get("download", {}).get("allow_private")))
+            except downloader.DownloadError as exc:
+                return bad_request(str(exc))
+        if mode == "media" and not (video or video_ref):
             return bad_request("请选择视频文件")
-        if mode == "subtitles" and not subtitles:
+        if mode == "subtitles" and not (subtitles or sub_ref):
             return bad_request("请选择字幕文件")
-        if mode == "media":
-            subtitles = None
         target = request.form.get("target", "zh")
         if target and target not in LANG_CODES:
             return bad_request("不支持的目标语言")
@@ -429,11 +540,13 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
             return bad_request(str(exc))
         notes = request.form.get("notes", "")[:4000]
         segments, raw, sub_suffix = None, b"", ""
-        if subtitles:
-            sub_suffix = Path(subtitles.filename).suffix.lower()
+        if subtitles or sub_ref:
+            sub_suffix = (sub_ref.suffix if sub_ref else Path(subtitles.filename).suffix).lower()
             if sub_suffix not in SUBTITLE_SUFFIXES:
                 return bad_request("目前只能导入 SRT 或 VTT 字幕")
-            raw = subtitles.read()
+            if sub_ref and sub_ref.stat().st_size > MAX_SUBTITLE_BYTES:
+                return bad_request("字幕文件太大")
+            raw = sub_ref.read_bytes() if sub_ref else subtitles.read()
             try:
                 segments = parse_srt(raw.decode("utf-8-sig"))
             except UnicodeDecodeError:
@@ -445,18 +558,33 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
             suffix = Path(video.filename).suffix.lower()[:8] or ".mp4"
             tmp = workspace / "uploads" / f"{secrets.token_hex(8)}{suffix}"
             video.save(tmp)
-        name = Path((video or subtitles).filename).name
-        job = Job.create(workspace, tmp, target or None, source,
+        if url:
+            name = urlsplit(url).netloc + urlsplit(url).path
+        elif video_ref or video:
+            name = video_ref.name if video_ref else Path(video.filename).name
+        else:
+            name = sub_ref.name if sub_ref else Path(subtitles.filename).name
+        has_video = bool(tmp or video_ref or url)
+        job = Job.create(workspace, tmp or video_ref, target or None, source,
                          bilingual=request.form.get("bilingual") == "true" and bool(target),
-                         burn=request.form.get("burn") == "true" and tmp is not None, fmt=fmt,
-                         move_video=tmp is not None, glossaries=glossaries, notes=notes)
+                         burn=request.form.get("burn") == "true" and has_video, fmt=fmt,
+                         move_video=tmp is not None, glossaries=glossaries, notes=notes, source_url=url)
         with runner.reserve(job.state.id) as reservation:
-            write_json(job.path("meta.json"), {"name": name})
+            write_json(job.path("meta.json"), {"name": name, **({"url": url} if url else {})})
             if segments is not None:
                 job.path("imported" + sub_suffix).write_bytes(raw)
                 job.import_subtitles(segments)
             runner.submit(job, reservation)
         return jsonify(id=job.state.id, url=url_for("job_page", job_id=job.state.id)), 201
+
+    @app.get("/api/files")
+    def api_files():
+        """浏览服务器上允许访问的目录。kind=video / subtitles 时只列出这类文件。"""
+        try:
+            return jsonify(browser.list(request.args.get("root", 0), request.args.get("path", ""),
+                                        request.args.get("kind")))
+        except FileAccessError as exc:
+            return bad_request(str(exc))
 
     @app.delete("/api/jobs/<job_id>")
     def api_delete(job_id: str):
@@ -473,7 +601,8 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
         with runner.reserve(job_id) as reservation:
             job = load(job_id)
             check_revision(job, edit_body())
-            if job.state.source_type != "subtitles" and not Path(job.state.video).is_file():
+            if (job.state.source_type != "subtitles" and not job.state.source_url
+                    and not Path(job.state.video).is_file()):
                 return bad_request("找不到原视频，无法重新识别")
             job.migrate()
             if job.state.source_type != "subtitles":
@@ -536,7 +665,7 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
             st.bilingual = body.get("bilingual", st.bilingual) and bool(st.target_lang)
             st.burn = body.get("burn", st.burn)
             # 已完成识别和翻译的任务只需从生成字幕开始；中断或失败的任务从断点续跑。
-            prepared = set(STAGES[:STAGES.index("translate")]) | ({"translate"} if st.target_lang else set())
+            prepared = set(enabled_stages(st)) - {"write", "burn"}
             from_stage = "write" if prepared <= set(st.completed) else None
             runner.submit(job, reservation, from_stage=from_stage)
         return jsonify(view(load(job_id)))

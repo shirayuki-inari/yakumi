@@ -67,9 +67,42 @@ def local_checks(cfg: dict[str, Any], config_path: str | Path | None = None) -> 
     checks.extend(_asr_checks(cfg["asr"]))
     checks.extend(_translate_checks(cfg))
     checks.extend(_segment_checks(cfg))
+    checks.extend(_web_checks(cfg))
     punct = cfg["subtitle"].get("punctuation", "subtitle")
     checks.append(Check(INFO, "字幕标点：" + ("按字幕惯例（中日文句中逗号句号换成空格，行尾的去掉）"
                                           if punct == "subtitle" else "原样保留"), group="字幕"))
+    return checks
+
+
+def _web_checks(cfg: dict[str, Any]) -> list[Check]:
+    """可选组件和网页工作台的部署设置。"""
+    import importlib.util
+    import os
+
+    from .download import ytdlp_command
+    from .web.auth import PASSWORD_ENV
+
+    group = "可选组件与部署"
+    ytdlp = ytdlp_command(cfg.get("download", {}))
+    checks = [
+        Check(OK, "yt-dlp：" + ("Python 模块" if ytdlp[-1] == "yt_dlp" else ytdlp[0]) + "（可以下载视频链接）",
+              group=group)
+        if ytdlp else
+        Check(INFO, "yt-dlp：未安装，不能下载视频链接（可选）", group=group,
+              detail=["需要时安装：pip install 'yakumi[ytdlp]'"]),
+        Check(OK, "waitress：yakumi serve 将使用它", group=group)
+        if importlib.util.find_spec("waitress") is not None else
+        Check(INFO, "waitress：未安装，yakumi serve 使用 Flask 自带的服务器（可选）", group=group,
+              detail=["部署到服务器时建议安装：pip install 'yakumi[server]'"]),
+    ]
+    web = cfg.get("web", {})
+    if os.environ.get(PASSWORD_ENV):
+        checks.append(Check(OK, f"网页登录密码：已设置（环境变量 {PASSWORD_ENV}）", group=group))
+    elif web.get("password_hash"):
+        checks.append(Check(OK, "网页登录密码：已设置", group=group))
+    else:
+        checks.append(Check(INFO, "网页登录密码：未设置，只能在本机或加 --no-auth 时使用", group=group,
+                            detail=["部署到服务器前运行 yakumi passwd"]))
     return checks
 
 

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}登录 · Yakumi{% endblock %}
+{% block content %}
+<section class="control-panel login-panel" aria-labelledby="login-title">
+  <div class="login-icon">{{ icon("lock", 22) }}</div>
+  <h1 id="login-title">登录 Yakumi</h1>
+  <p class="field-hint flush">这个工作台设置了访问密码。</p>
+  <form method="post" action="{{ url_for('login') }}" class="login-form">
+    <input type="hidden" name="next" value="{{ next }}" />
+    <label class="editor-field">
+      <span class="field-label">密码</span>
+      <input class="text-input" type="password" name="password" autocomplete="current-password" required autofocus />
+    </label>
+    <label class="remember">
+      <input type="checkbox" name="remember" checked />
+      <span>在这台设备上保持登录</span>
+    </label>
+    {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+    <button type="submit" class="primary generate-button">登录</button>
+  </form>
+  <p class="field-hint">忘记密码时，在服务器上运行 <code>yakumi passwd</code> 重新设置。</p>
+</section>
+{% endblock %}

@@ -446,17 +446,82 @@ def glossary_delete(name):
         raise click.ClickException(str(exc)) from exc
 
 
-@main.command()
-@click.option("--host", default="127.0.0.1", show_default=True)
-@click.option("--port", default=8765, show_default=True, type=int)
-@click.pass_context
-def serve(ctx, host: str, port: int):
-    """启动网页工作台。"""
-    from .web.app import create_app
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
+
+@main.command()
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="监听地址。部署到服务器、允许其他设备访问时用 0.0.0.0。")
+@click.option("--port", default=8765, show_default=True, type=int)
+@click.option("--no-auth", is_flag=True, help="对其他设备开放时也不要求登录（只在可信的局域网里使用）。")
+@click.pass_context
+def serve(ctx, host: str, port: int, no_auth: bool):
+    """启动网页工作台。
+
+    有 waitress 时使用它（pip install 'yakumi[server]'），否则使用 Flask 自带的服务器。
+    """
+    import logging
+    import os
+
+    from .web.app import create_app
+    from .web.auth import PASSWORD_ENV
+
+    web = _cfg(ctx)["web"]
+    has_password = bool(os.environ.get(PASSWORD_ENV) or web.get("password_hash"))
+    exposed = host not in LOOPBACK_HOSTS or int(web.get("proxy_count") or 0) > 0
+    if exposed and not has_password and not no_auth:
+        raise click.ClickException(
+            "工作台将对其他设备开放，但还没有设置登录密码。\n"
+            f"请先运行 yakumi passwd 设置密码（或设置环境变量 {PASSWORD_ENV}）；"
+            "只在可信的局域网里使用时，可以加 --no-auth。")
     app = create_app(ctx.obj.get("config"))
-    click.echo(f"Yakumi 网页工作台：http://{host}:{port}", err=True)
-    app.run(host=host, port=port, threaded=True, debug=False)
+    shown = f"[{host}]" if ":" in host else host
+    click.echo(f"Yakumi 网页工作台：http://{shown}:{port}"
+               + ("（所有网卡）" if host in ("0.0.0.0", "::") else "")
+               + ("，需要登录" if has_password else ""), err=True)
+    try:
+        import waitress
+    except ImportError:
+        waitress = None
+    if waitress is not None:
+        max_mb = int(web.get("max_upload_mb", 4096) or 0)
+        logging.getLogger("waitress").setLevel(logging.ERROR)
+        waitress.serve(app, host=host, port=port, threads=8, ident="yakumi",
+                       max_request_body_size=max_mb * 1024 * 1024 if max_mb > 0 else 1 << 50)
+        return
+    from werkzeug.serving import run_simple
+
+    # Flask 自带的服务器启动时总会提示“这是开发用服务器”，并逐条打印请求；这里只保留错误。
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+    if exposed:
+        click.echo("提示：对其他设备开放时，建议安装 waitress：pip install 'yakumi[server]'", err=True)
+    run_simple(host, port, app, threaded=True)
+
+
+@main.command()
+@click.option("--clear", is_flag=True, help="删除登录密码，之后访问工作台不需要登录。")
+@click.pass_context
+def passwd(ctx, clear: bool):
+    """设置网页工作台的登录密码（部署到服务器、对其他设备开放时需要）。"""
+    import os
+
+    from . import settings as settings_store
+    from .web.auth import PASSWORD_ENV, hash_password
+
+    if clear:
+        value = None
+    else:
+        password = click.prompt("新密码", hide_input=True, confirmation_prompt="再输入一次")
+        if len(password) < 8:
+            raise click.ClickException("密码至少需要 8 个字符")
+        value = hash_password(password)
+    try:
+        path = settings_store.write_values(ctx.obj.get("config"), {"web.password_hash": value})
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(f"无法写入配置文件：{exc}") from exc
+    click.echo(f"已{'删除' if clear else '保存'}登录密码（{path}）。重启 yakumi serve 后生效，已登录的设备需要重新登录。")
+    if os.environ.get(PASSWORD_ENV):
+        click.echo(click.style(f"! 当前设置了环境变量 {PASSWORD_ENV}，它优先于配置文件里的密码。", fg="yellow"), err=True)
 
 
 @main.command()

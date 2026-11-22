@@ -27,7 +27,8 @@ def app(fake_cfg):
 def test_pages_render(app):
     client = app.test_client()
     html = client.get("/").get_data(as_text=True)
-    assert "开始翻译" in html and "yakumi:theme" in html
+    assert "开始翻译" in html and "theme-init.js" in html
+    assert "<script>" not in html  # CSP 不允许内联脚本
     assert "<svg" in html  # 图标宏可用
     assert client.get("/static/style.css").status_code == 200
 

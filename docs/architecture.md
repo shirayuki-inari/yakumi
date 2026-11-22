@@ -55,10 +55,13 @@
 
 | 模块 | 职责 |
 | --- | --- |
-| `cli.py` | click 命令：run / transcribe / translate / burn / serve / jobs / doctor / glossary |
+| `cli.py` | click 命令：run / transcribe / translate / burn / serve / passwd / jobs / doctor / glossary |
 | `web/` | 网页工作台：`app.py`（路由、任务队列、跨站与 Host 检查）、`templates/`、`static/` |
 | `settings.py` | 网页可修改的配置项（分组、校验、来源），按行写回配置文件并保留注释 |
 | `doctor.py` | 环境与配置检查，命令行 `doctor` 和网页设置页共用 |
+| `download.py` | 视频链接下载（可选，调用 yt-dlp 子进程），以及链接地址检查 |
+| `web/auth.py` | 网页登录：密码校验、登录失败限速、签名密钥 |
+| `web/browse.py` | 浏览和选择服务器上允许访问的目录里的文件 |
 | `pipeline.py` | 任务（`Job`）的创建、载入、迁移、续跑，以及各阶段函数 |
 | `config.py` | 默认配置、配置文件与环境变量的合并（`build_config`）、未知配置项提示 |
 | `models.py` | `Segment`、`JobState`、阶段列表与流水线版本 |

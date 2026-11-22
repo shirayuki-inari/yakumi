@@ -4,22 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#eef0f3" />
-    <script>
-      // 在首次绘制前确定主题，避免深色模式下闪白。
-      (() => {
-        let preference = "system";
-        try {
-          preference = localStorage.getItem("yakumi:theme") || "system";
-        } catch {}
-        const dark =
-          preference === "dark" ||
-          (preference !== "light" &&
-            preference !== "dark" &&
-            window.matchMedia("(prefers-color-scheme: dark)").matches);
-        document.documentElement.dataset.theme = dark ? "dark" : "light";
-        document.querySelector('meta[name="theme-color"]').content = dark ? "#101317" : "#eef0f3";
-      })();
-    </script>
+    <script src="{{ url_for('static', filename='theme-init.js') }}"></script>
     <meta name="description" content="Yakumi：上传视频，自动生成翻译字幕。" />
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo.svg') }}" />
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
@@ -33,11 +18,18 @@
           <span>Yakumi</span>
         </a>
         <div class="header-actions">
+          {% if logged_in and request.endpoint != 'login' %}
           <a class="help-button" href="{{ url_for('glossaries_page') }}"{% if request.endpoint == 'glossaries_page' %} aria-current="page"{% endif %}>{{ icon("book-open", 16) }}<span>术语表</span></a>
           <a class="help-button" href="{{ url_for('settings_page') }}"{% if request.endpoint == 'settings_page' %} aria-current="page"{% endif %}>{{ icon("settings", 16) }}<span>设置</span></a>
           <button type="button" class="help-button" data-open-help>
             {{ icon("circle-help", 16) }}<span>使用说明</span>
           </button>
+          {% if auth_enabled %}
+          <form method="post" action="{{ url_for('logout') }}" class="logout-form">
+            <button type="submit" class="help-button" title="退出登录" aria-label="退出登录">{{ icon("log-out", 16) }}</button>
+          </form>
+          {% endif %}
+          {% endif %}
           <div class="theme-picker" data-theme-picker>
             <button type="button" class="theme-trigger" aria-label="外观设置" aria-haspopup="menu" aria-expanded="false">
               {{ icon("monitor", 16, attrs='data-theme-icon="system"') }}
@@ -61,7 +53,7 @@
         <button type="button" class="icon-button close-modal" aria-label="关闭" data-close-help>{{ icon("x", 18) }}</button>
         <h2 id="help-title">使用说明</h2>
         <ol>
-          <li><strong>上传视频</strong><p>选择视频文件和目标语言。原语言默认自动识别，也可以手动指定；“翻译成”选择“不翻译”时只识别原文。已经有字幕时切换到“已有字幕”，上传 SRT / VTT 直接翻译，也可以附带视频用于预览和烧录。</p></li>
+          <li><strong>选择视频</strong><p>上传视频，或点“服务器”选择服务器上已有的文件；也可以切换到“视频链接”粘贴网址（服务器需要安装 yt-dlp）。原语言默认自动识别；“翻译成”选择“不翻译”时只识别原文。已经有字幕时切换到“已有字幕”，导入 SRT / VTT 直接翻译，也可以附带视频用于预览和烧录。</p></li>
           <li><strong>等待处理</strong><p>依次进行语音识别、断句、翻译。可以关闭页面，任务会在后台继续。</p></li>
           <li><strong>校对字幕</strong><p>在任务页逐条修改原文和译文，点击视频下方的字幕行可以跳到对应位置。</p></li>
           <li><strong>导出</strong><p>选择单语或双语、字幕格式，以及是否把字幕烧录进视频，然后下载。</p></li>

@@ -159,6 +159,9 @@ GROUPS: list[dict[str, Any]] = [
          Field("repair.max_repairs", "最多复核几处", "int", min=0, max=200,
                show_if={"field": "repair.enabled", "in": [True]}),
          Field("workspace.keep_audio", "保留抽出的音频", "bool", "任务完成后保留 audio.wav（约 115MB/小时）。"),
+         Field("download.format", "链接下载格式", "text", "下载视频链接时交给 yt-dlp 的 -f 参数（需要安装 yt-dlp）。",
+               required=True, suggestions=("bv*[height<=1080]+ba/b[height<=1080]/b", "bv*[height<=720]+ba/b[height<=720]/b",
+                                           "ba/b")),
      ]},
 ]
 FIELDS = {f.id: f for g in GROUPS for f in g["fields"]}
@@ -171,6 +174,12 @@ READONLY = [
     ("workspace.dir", "任务目录"),
     ("web.max_upload_mb", "上传大小上限（MB）"),
     ("web.allowed_hosts", "允许的域名"),
+    ("web.password_hash", "登录密码"),
+    ("web.proxy_count", "反向代理层数"),
+    ("web.file_roots", "可浏览的服务器目录"),
+    ("download.ytdlp", "yt-dlp 程序"),
+    ("download.extra_args", "yt-dlp 额外参数"),
+    ("download.allow_private", "允许下载内网链接"),
 ]
 SERVICE_SECTIONS = ("asr", "translate", "segment")
 
@@ -258,7 +267,14 @@ def describe(config_path: str | Path | None = None) -> dict[str, Any]:
     for fid, label in READONLY:
         section, key = fid.split(".", 1)
         value = cfg[section].get(key)
-        if isinstance(value, list):
+        if fid == "web.password_hash":  # 只说明是否设置，不显示哈希
+            from .web.auth import PASSWORD_ENV
+
+            value = ("已设置（环境变量 " + PASSWORD_ENV + "）" if os.environ.get(PASSWORD_ENV)
+                     else "已设置（用 yakumi passwd 修改）" if value else "未设置（用 yakumi passwd 设置）")
+        elif isinstance(value, bool):
+            value = "是" if value else "否"
+        elif isinstance(value, list):
             value = "、".join(map(str, value)) or "（无）"
         readonly.append({"id": fid, "label": label, "value": "" if value in (None, "") else str(value)})
     return {
@@ -388,20 +404,37 @@ def save(config_path: str | Path | None, changes: dict[str, Any]) -> SaveResult:
         raise SettingsError(str(exc)) from exc
     _check_combined(after)
 
-    text = patch_toml(old_text, {fid: updates[fid] for fid in updates})
+    result.notices += _write_toml(target, old_text, updates, after_data)
+    result.cfg, result.changed = after, list(updates)
+    return result
+
+
+def write_values(config_path: str | Path | None, values: dict[str, Any]) -> Path:
+    """直接写入配置项（不经过网页可修改项的检查，供 yakumi passwd 等命令使用）。值为 None 时删除。"""
+    target = config_target(config_path)
+    old_text = target.read_text(encoding="utf-8") if target.is_file() else ""
+    old_data = tomllib.loads(old_text) if old_text else {}
+    updates = {fid: REMOVE if value is None else value for fid, value in values.items()}
+    _write_toml(target, old_text, updates, _apply(old_data, updates))
+    return target
+
+
+def _write_toml(target: Path, old_text: str, updates: dict[str, Any], after_data: dict[str, Any]) -> list[str]:
+    """逐行修改后核对；无法逐行修改（多行值、内联表等）时整体重写并备份原文件。返回需要告诉用户的提示。"""
+    notices = []
+    text = patch_toml(old_text, updates)
     try:
         ok = tomllib.loads(text) == after_data
     except tomllib.TOMLDecodeError:
         ok = False
-    if not ok:  # 无法逐行修改（多行值、内联表等）：整体重写并备份原文件
+    if not ok:
         backup = target.with_name(target.name + ".bak")
         if old_text:
             _write_private(backup, old_text, like=target)
-            result.notices.append(f"配置文件结构较复杂，已整体重写，原文件备份为 {backup}")
-        text = f"# Yakumi 配置（由网页设置重写，原文件备份为 {backup.name}）\n\n" + dump_toml(after_data)
+            notices.append(f"配置文件结构较复杂，已整体重写，原文件备份为 {backup}")
+        text = f"# Yakumi 配置（已整体重写，原文件备份为 {backup.name}）\n\n" + dump_toml(after_data)
     _write_private(target, text, like=target)
-    result.cfg, result.changed = after, list(updates)
-    return result
+    return notices
 
 
 def _apply(data: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:

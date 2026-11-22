@@ -32,6 +32,13 @@ yakumi doctor --online        # 检查运行环境、配置和密钥
 
 没有 onnxruntime 也能运行，VAD 会改用 ffmpeg 静音检测，但背景音乐较强时切点可能不准。
 
+两个可选组件，需要时再装：
+
+```bash
+pip install -e '.[ytdlp]'     # 网页上的“视频链接”：用 yt-dlp 下载后识别（也可以用系统里的 yt-dlp 程序）
+pip install -e '.[server]'    # waitress：部署到服务器时，yakumi serve 自动使用它
+```
+
 ## 配置
 
 默认通过 [OpenRouter](https://openrouter.ai) 调用 Gemini 3.5 Transcribe 识别、Gemini 3.8 Flash 断句和翻译，只需要一个密钥：
@@ -146,11 +153,10 @@ yakumi glossary show 我的频道
 ## 网页工作台
 
 ```bash
-yakumi serve                    # 默认 http://127.0.0.1:8765
-yakumi serve --host 0.0.0.0     # 允许局域网内其他设备访问
+yakumi serve                    # 默认 http://127.0.0.1:8765，只有本机能访问，不需要登录
 ```
 
-1. 选择视频和目标语言，点击“开始翻译”。“翻译成”选“不翻译”时只识别原文（相当于 `yakumi transcribe`）。
+1. 选择视频和目标语言，点击“开始翻译”。视频可以上传，也可以点“服务器”选择服务器上已有的文件；切换到“视频链接”时粘贴 YouTube、Bilibili 等网站的链接，下载后自动识别（需要 yt-dlp）。“翻译成”选“不翻译”时只识别原文（相当于 `yakumi transcribe`）。
 2. 任务在后台依次执行，页面实时显示进度和每个步骤的状态。关闭页面不影响任务。
 3. 完成后在“字幕校对”里逐条修改原文和译文，点击时间可以跳到视频对应位置。
 4. 选择单语或双语、字幕格式，以及是否烧录，点击“保存并生成”，然后下载。
@@ -168,7 +174,40 @@ yakumi serve --host 0.0.0.0     # 允许局域网内其他设备访问
 
 网页界面支持浅色、深色和跟随系统，也适配手机屏幕。
 
-> 网页工作台没有登录功能，请不要直接暴露到公网。它会拒绝来自其他网站的请求；用域名（而不是 IP 地址）访问时，需要把域名加入配置 `[web] allowed_hosts`。上传大小默认限制为 4096 MB（`max_upload_mb`）。详见 [`SECURITY.md`](SECURITY.md)。
+### 服务器上的文件
+
+网页上默认只能浏览任务目录（`[workspace] dir`，其中工作台自己的 `jobs/`、`uploads/` 不显示），把视频放进去就能直接选择，不用再上传。需要访问其他目录时加到配置里：
+
+```toml
+[web]
+file_roots = ["~/Videos", "/mnt/media"]
+```
+
+选择的文件原地使用，不会被复制；删除任务也不会删除它。指向允许目录之外的符号链接一律拒绝。
+
+### 部署到远程服务器
+
+```bash
+pip install -e '.[server]'      # 推荐：使用 waitress
+yakumi passwd                   # 设置登录密码（保存为哈希）
+yakumi serve --host 0.0.0.0     # 对其他设备开放；没有设置密码时会拒绝启动
+```
+
+- **登录**：设置密码后，访问工作台需要先登录；可以勾选“保持登录”（`[web] session_days`，默认 30 天）。连续输错 5 次需要等 10 分钟。修改密码后，所有已登录的设备都需要重新登录。容器部署时也可以用环境变量 `YAKUMI_WEB_PASSWORD` 提供密码。
+- **HTTPS**：公网访问请放在 nginx、Caddy 等反向代理后面并启用 HTTPS，在配置里写明代理层数和域名。通过 HTTPS 访问时，登录 Cookie 只走 HTTPS。
+
+  ```toml
+  [web]
+  proxy_count = 1                    # 前面有一层反向代理，信任它转发的 X-Forwarded-For / Proto / Host
+  allowed_hosts = ["yakumi.example.com"]
+  max_upload_mb = 8192
+  ```
+
+  反向代理需要转发 `Host` 或 `X-Forwarded-Host`，上传大小限制也要放宽（nginx：`client_max_body_size 8g;`）。工作台需要部署在域名的根路径。
+- **只在可信的局域网里使用**时，可以不设密码：`yakumi serve --host 0.0.0.0 --no-auth`。
+- 没有 waitress 时使用 Flask 自带的服务器（会提示安装 waitress）。
+
+视频链接默认拒绝指向本机和局域网地址的链接（`[download] allow_private`），下载格式可以在“设置”里修改（默认最高 1080p）。工作台会拒绝来自其他网站的请求，页面带有 CSP 等安全响应头。详见 [`SECURITY.md`](SECURITY.md)。
 
 ## 长视频是怎么处理的
 

@@ -13,6 +13,7 @@ def isolated_cache(tmp_path, monkeypatch):
     """测试不读写真实的 ~/.cache/yakumi（能力探测缓存等）和 ~/.config/yakumi（术语表等）。"""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv("YAKUMI_WEB_PASSWORD", raising=False)
 
 
 @pytest.fixture

@@ -1,7 +1,8 @@
-"""任务流水线：extract → vad → transcribe → merge → repair → segment → translate → write → burn。
+"""任务流水线：（download →）extract → vad → transcribe → merge → repair → segment → translate → write → burn。
 
 每个任务对应一个目录（默认 .yakumi/jobs/<id>/），各阶段的产物都落盘：
 
+    download.<ext>   视频链接任务下载的视频（需要 yt-dlp）
     audio.wav        抽出的音频（16kHz 单声道 16 位），VAD、切片与复核都从这里读取
     vad.json         语音区间
     windows.json     识别窗口计划；pieces/ 下是每个窗口的识别结果
@@ -51,13 +52,14 @@ ProgressFn = Callable[[JobState], None]
 AUDIO_STAGES = {"vad", "transcribe", "repair"}
 
 # 各阶段在总进度里的占比
-WEIGHTS = {"extract": 3, "vad": 4, "transcribe": 34, "merge": 1, "repair": 3, "segment": 4, "translate": 34,
+WEIGHTS = {"download": 10, "extract": 3, "vad": 4, "transcribe": 34, "merge": 1, "repair": 3, "segment": 4, "translate": 34,
            "write": 2, "burn": 14}
 
 # 旧版本任务的迁移：版本号 → 从哪个阶段开始重跑（之前的产物格式没变，保留）。不在表里的版本从头重跑
 MIGRATIONS = {3: "segment"}  # 3 → 4：断句改为 LLM 断句 + 句内拆分，识别、合并、复核的结果不变
 
 STAGE_LABELS = {
+    "download": "下载视频",
     "extract": "抽取音频",
     "vad": "检测语音",
     "transcribe": "语音识别",
@@ -96,10 +98,11 @@ class Job:
                source_lang: str | None = None, bilingual: bool = False, burn: bool = False,
                fmt: str = "srt", move_video: bool = False, job_id: str | None = None,
                glossaries: list[str] | None = None, notes: str = "",
-               stage_inputs: dict[str, str] | None = None) -> "Job":
+               stage_inputs: dict[str, str] | None = None, source_url: str = "") -> "Job":
         """创建任务。`move_video` 为真时把视频移入任务目录（用于网页上传的临时文件）。
 
-        `video` 为空时是没有视频的字幕任务，之后需要用 `import_subtitles` 导入字幕。
+        `video` 为空时，要么是没有视频的字幕任务（之后用 `import_subtitles` 导入字幕），
+        要么是视频链接任务（`source_url`，由 download 阶段下载）。
         """
         root = Path(workspace) / "jobs"
         now = time.time()
@@ -108,6 +111,7 @@ class Job:
             source_lang=source_lang or None, bilingual=bilingual, burn=burn, format=fmt,
             created_at=now, updated_at=now, pipeline_version=PIPELINE_VERSION,
             glossaries=list(glossaries or []), notes=notes.strip(), stage_inputs=stage_inputs,
+            source_url=source_url,
         )
         job = cls(root, state)
         job.dir.mkdir(parents=True, exist_ok=True)
@@ -243,16 +247,21 @@ def enabled_stages(state: JobState) -> list[str]:
     stages = list(STAGES)
     if state.source_type == "subtitles":
         stages = stages[STAGES.index("translate"):]
+    if not state.source_url and "download" in stages:
+        stages.remove("download")
     if not state.target_lang:
         stages.remove("translate")
-    if not state.burn or not state.video:
+    if not state.burn or not (state.video or state.source_url):
         stages.remove("burn")
     return stages
 
 
 def first_stage(state: JobState) -> str:
-    """“从头重新处理”时从哪个阶段开始。"""
-    return enabled_stages(state)[0]
+    """“从头重新处理”时从哪个阶段开始。已经下载好的链接视频不重新下载。"""
+    stages = enabled_stages(state)
+    if stages[0] == "download" and state.video and Path(state.video).is_file():
+        return "extract"
+    return stages[0]
 
 
 def run(job: Job, cfg: dict[str, Any], progress: ProgressFn | None = None, force: bool = False,
@@ -309,6 +318,18 @@ def run(job: Job, cfg: dict[str, Any], progress: ProgressFn | None = None, force
 
 # ---- 各阶段 -----------------------------------------------------------
 StageReport = Callable[..., None]
+
+
+def _stage_download(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
+    from .download import DownloadError, download
+
+    try:
+        path, title = download(job.state.source_url, job.dir, cfg.get("download", {}), progress=report)
+    except DownloadError as exc:
+        raise PipelineError(str(exc)) from exc
+    job.state.video = str(path.resolve())
+    if title:  # 网页上显示视频标题
+        write_json(job.path("meta.json"), {"name": f"{title}{path.suffix}", "url": job.state.source_url})
 
 
 def _stage_extract(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
@@ -490,6 +511,7 @@ def _stage_burn(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
 
 
 STAGE_FUNCS: dict[str, Callable[[Job, dict[str, Any], StageReport], None]] = {
+    "download": _stage_download,
     "extract": _stage_extract,
     "vad": _stage_vad,
     "transcribe": _stage_transcribe,

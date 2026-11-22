@@ -96,6 +96,11 @@
       /* 网络波动时稍后重试 */
     }
     showState();
+    // 链接视频下载完成后刷新页面，换上播放器
+    if (job.has_video && document.querySelector("[data-awaiting-video]") && !dirty) {
+      window.location.reload();
+      return;
+    }
     if (busy()) {
       pollTimer = setTimeout(poll, 1000);
     } else {

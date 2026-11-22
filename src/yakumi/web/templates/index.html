@@ -17,25 +17,46 @@
   <h1 id="upload-title" class="visually-hidden">新建任务</h1>
   <form class="source-form" data-upload-form data-mode="media">
     <div class="segmented mode-switch" role="radiogroup" aria-label="任务类型" data-mode-switch>
-      <button type="button" role="radio" class="selected" aria-checked="true" data-value="media">{{ icon("film", 15) }}<span>识别视频</span></button>
+      <button type="button" role="radio" class="selected" aria-checked="true" data-value="media">{{ icon("film", 15) }}<span>视频文件</span></button>
+      <button type="button" role="radio" aria-checked="false" data-value="url">{{ icon("link", 15) }}<span>视频链接</span></button>
       <button type="button" role="radio" aria-checked="false" data-value="subtitles">{{ icon("file-text", 15) }}<span>已有字幕</span></button>
     </div>
 
     <div class="source-link-field">
       <span class="field-label" data-only="media">视频文件</span>
+      <label class="field-label" for="video-url" data-only="url" hidden>视频链接</label>
       <span class="field-label" data-only="subtitles" hidden>字幕文件</span>
-      <label class="url-field file-field" data-only="media">
-        {{ icon("film", 16) }}
-        <input type="file" name="video" accept="video/*,audio/*,.mkv" data-file-input />
-        <span class="file-name" data-placeholder="选择或拖入视频">选择或拖入视频</span>
-        <span class="file-pick">浏览</span>
+      <div data-only="media">
+      <div class="file-slot" data-slot data-kind="video">
+        <label class="url-field file-field">
+          {{ icon("film", 16) }}
+          <input type="file" name="video" accept="video/*,audio/*,.mkv" data-file-input />
+          <span class="file-name" data-placeholder="选择或拖入视频，也可以选服务器上的文件">选择或拖入视频，也可以选服务器上的文件</span>
+          <span class="file-pick">上传</span>
+        </label>
+        <input type="hidden" name="video_ref" data-ref-input />
+        <button type="button" class="secondary-button slot-button" data-pick-server title="选择服务器上的文件">{{ icon("server", 16) }}<span>服务器</span></button>
+        <button type="button" class="icon-button" data-clear-slot aria-label="清除选择" hidden>{{ icon("x", 16) }}</button>
+      </div>
+      </div>
+      <label class="url-field" data-only="url" hidden>
+        {{ icon("link", 16) }}
+        <input id="video-url" class="url-input" type="url" name="url" inputmode="url" autocomplete="off" spellcheck="false"
+               placeholder="https://www.youtube.com/watch?v=…" data-url-input disabled{% if not ytdlp %} data-unavailable{% endif %} />
       </label>
-      <label class="url-field file-field" data-only="subtitles" hidden>
-        {{ icon("file-text", 16) }}
-        <input type="file" name="subtitles" accept=".srt,.vtt" data-file-input disabled />
-        <span class="file-name" data-placeholder="选择或拖入 SRT / VTT 字幕">选择或拖入 SRT / VTT 字幕</span>
-        <span class="file-pick">浏览</span>
-      </label>
+      <div data-only="subtitles" hidden>
+      <div class="file-slot" data-slot data-kind="subtitles">
+        <label class="url-field file-field">
+          {{ icon("file-text", 16) }}
+          <input type="file" name="subtitles" accept=".srt,.vtt" data-file-input disabled />
+          <span class="file-name" data-placeholder="选择或拖入 SRT / VTT 字幕">选择或拖入 SRT / VTT 字幕</span>
+          <span class="file-pick">上传</span>
+        </label>
+        <input type="hidden" name="subtitles_ref" data-ref-input disabled />
+        <button type="button" class="secondary-button slot-button" data-pick-server title="选择服务器上的文件">{{ icon("server", 16) }}<span>服务器</span></button>
+        <button type="button" class="icon-button" data-clear-slot aria-label="清除选择" hidden>{{ icon("x", 16) }}</button>
+      </div>
+      </div>
     </div>
     <div class="source-language-field">
       <label class="field-label" for="target">翻译成</label>
@@ -59,16 +80,26 @@
     </div>
 
     <div class="optional-video" data-only="subtitles" hidden>
-      <label class="url-field file-field compact">
-        {{ icon("film", 16) }}
-        <input type="file" name="video" accept="video/*,audio/*,.mkv" data-file-input disabled />
-        <span class="file-name" data-placeholder="附带视频（可选）：用于预览和烧录">附带视频（可选）：用于预览和烧录</span>
-        <span class="file-pick">浏览</span>
-      </label>
+      <div class="file-slot" data-slot data-kind="video">
+        <label class="url-field file-field compact">
+          {{ icon("film", 16) }}
+          <input type="file" name="video" accept="video/*,audio/*,.mkv" data-file-input disabled />
+          <span class="file-name" data-placeholder="附带视频（可选）：用于预览和烧录">附带视频（可选）：用于预览和烧录</span>
+          <span class="file-pick">上传</span>
+        </label>
+        <input type="hidden" name="video_ref" data-ref-input disabled />
+        <button type="button" class="secondary-button slot-button" data-pick-server title="选择服务器上的文件">{{ icon("server", 16) }}<span>服务器</span></button>
+        <button type="button" class="icon-button" data-clear-slot aria-label="清除选择" hidden>{{ icon("x", 16) }}</button>
+      </div>
     </div>
 
     <div class="source-meta">
       <span class="platform-pill" data-file-meta data-only="media">支持 MP4、MOV、MKV、WebM 等常见格式，也可以是音频</span>
+      {% if ytdlp %}
+      <span class="platform-pill" data-only="url" hidden>用 yt-dlp 下载后自动识别，支持 YouTube、Bilibili 等网站</span>
+      {% else %}
+      <span class="platform-pill warning" data-only="url" hidden>服务器没有安装 yt-dlp，暂时不能使用视频链接（pip install 'yakumi[ytdlp]'）</span>
+      {% endif %}
       <span class="platform-pill" data-only="subtitles" hidden>UTF-8 编码的 SRT 或 VTT，翻译时按句末标点把相邻字幕并成句子</span>
       <div class="upload-options">
         <label class="inline-select">
@@ -136,5 +167,26 @@
     <p>还没有任务，上传一个视频开始吧</p>
   </div>
 </section>
+<div class="modal-backdrop" data-browser hidden>
+  <div class="help-modal browser-modal" role="dialog" aria-modal="true" aria-labelledby="browser-title">
+    <button type="button" class="icon-button close-modal" aria-label="关闭" data-close-browser>{{ icon("x", 18) }}</button>
+    <h2 id="browser-title">选择服务器上的文件</h2>
+    <div class="browser-bar">
+      <div class="select-wrap plain browser-root" data-root-wrap>
+        <select data-browser-root aria-label="目录"></select>
+        {{ icon("chevron-down", 16) }}
+      </div>
+      <button type="button" class="icon-button" data-browser-up aria-label="上一级" title="上一级">{{ icon("arrow-up", 16) }}</button>
+      <span class="browser-path" data-browser-path></span>
+    </div>
+    <ul class="browser-list" data-browser-list></ul>
+    <p class="field-hint" data-browser-hint></p>
+  </div>
+</div>
+<template data-icon="folder">{{ icon("folder", 18) }}</template>
+<template data-icon="video">{{ icon("film", 18) }}</template>
+<template data-icon="audio">{{ icon("music", 18) }}</template>
+<template data-icon="subtitles">{{ icon("file-text", 18) }}</template>
+<template data-icon="chevron">{{ icon("chevron-right", 16) }}</template>
 {% endblock %}
 {% block scripts %}<script src="{{ url_for('static', filename='app.js') }}"></script>{% endblock %}

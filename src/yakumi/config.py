@@ -101,6 +101,17 @@ DEFAULTS: dict[str, Any] = {
     "web": {
         "max_upload_mb": 4096,  # 上传文件大小上限（MB），0 表示不限制
         "allowed_hosts": [],  # 用域名访问工作台时，把域名加在这里（IP 地址和 localhost 总是允许）
+        "password_hash": "",  # 登录密码的哈希，用 yakumi passwd 设置；设置后访问工作台需要登录
+        "session_days": 30,  # 勾选“保持登录”时，登录状态保留的天数
+        "proxy_count": 0,  # 工作台前面有几层反向代理（nginx、Caddy 等）；大于 0 时信任 X-Forwarded-* 头
+        "file_roots": [],  # 除任务目录外，允许在网页上浏览和选择文件的服务器目录
+    },
+    "download": {
+        # 视频链接（需要安装 yt-dlp）。默认最高 1080p，音视频合并为 MP4
+        "format": "bv*[height<=1080]+ba/b[height<=1080]/b",
+        "ytdlp": "",  # yt-dlp 程序路径；留空时自动查找（Python 模块或 PATH 里的 yt-dlp）
+        "extra_args": [],  # 额外传给 yt-dlp 的参数，例如 ["--cookies", "~/cookies.txt"]
+        "allow_private": False,  # 是否允许下载局域网、本机地址的链接
     },
     "workspace": {
         "dir": ".yakumi",

@@ -7,7 +7,7 @@
     <h1 class="job-title" title="{{ job.name }}">{{ job.name }}</h1>
     <span class="status-chip" data-status="{{ job.status }}" data-status-chip>{{ job.status_label }}</span>
   </div>
-  <p class="job-sub">{{ job.lang_label }} · {{ job.created }}</p>
+  <p class="job-sub">{{ job.lang_label }} · {{ job.created }}{% if job.source_url %} · <a href="{{ job.source_url }}" target="_blank" rel="noopener noreferrer">原链接</a>{% endif %}</p>
 </div>
 
 <div class="workspace">
@@ -30,7 +30,7 @@
           <button type="button" class="toggle" role="switch" aria-checked="false" aria-labelledby="set-bilingual" data-setting="bilingual"><span></span></button>
         </div>
         {% endif %}
-        {% if job.has_video %}
+        {% if job.has_video or job.source_url %}
         <div class="toggle-row">
           <span class="toggle-title" id="set-burn">烧录进视频</span>
           <button type="button" class="toggle" role="switch" aria-checked="false" aria-labelledby="set-burn" data-setting="burn"><span></span></button>
@@ -104,6 +104,12 @@
       <video controls playsinline preload="metadata" data-video src="{{ url_for('job_file', job_id=job.id, name='source') }}">
         <track kind="subtitles" label="字幕" srclang="{{ job.target_lang or 'und' }}" default data-track />
       </video>
+    </div>
+    {% elif job.source_url %}
+    <div class="empty-preview no-video" data-awaiting-video>
+      {{ icon("link", 28) }}
+      <p>正在从链接下载视频，下载完成后可以在这里预览。</p>
+      <p class="field-hint flush source-url">{{ job.source_url }}</p>
     </div>
     {% else %}
     <div class="empty-preview no-video">
