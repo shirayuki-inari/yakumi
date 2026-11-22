@@ -56,8 +56,8 @@ notes = ""
 # order = ["google-ai-studio"]
 # allow_fallbacks = true
 
-# 全局固定译法：原文 = 译文，对所有任务生效。可复用的背景资料保存在 ~/.config/yakumi/glossaries/，
-# 用 yakumi context 或网页“背景资料”管理，运行时用 -x 选用，会与这里合并（背景资料优先）
+# 全局固定译法：原文 = 译文（译名不限定语言），对所有任务生效。可复用的背景资料保存在 ~/.config/yakumi/glossaries/，
+# 用 yakumi context 或网页“背景资料”管理，运行时用 -x 选用，会与这里合并（背景资料和任务的术语审核结果优先）
 [translate.glossary]
 # "Yakumi" = "Yakumi"
 
@@ -74,6 +74,19 @@ chunk_chars = 400        # 每次请求的文本长度（字）
 max_sentence_chars = 60  # 希望每句不超过的字数；超过两倍时强制拆开
 concurrency = 4
 cue_gap = 1.2            # 同一句内，停顿超过这么多秒就拆成新的字幕条
+
+[terms]
+# 术语扫描：翻译前让模型找出人名、昵称、作品名等（包括被识别写错的），审核后统一译名。见 README“术语扫描与审核”
+mode = "off"             # 新任务的默认做法：off（不扫描）| review（扫描后暂停，等人工审核）| auto（只自动采用与背景资料对应的结果）
+model = "deepseek/deepseek-v4.1-flash-1017"
+# 服务地址、密钥、思考档位、路由等留空时沿用 [translate]；密钥只在同一服务来源下继承
+# base_url = "https://openrouter.ai/api/v1"
+# api_key = ""
+reasoning_effort = "low" # deepseek-v4.1-flash 可选 max / high / low / none（没有 medium）；留空沿用 [translate]
+temperature = 0
+chunk_chars = 4000       # 每次请求的文本长度（字）
+overlap_chars = 200      # 相邻两块重叠的长度（字）
+concurrency = 4
 
 [chunking]
 vad = "silero"           # silero | energy（ffmpeg 静音检测）| none；没有 onnxruntime 时自动用 energy

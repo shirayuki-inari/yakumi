@@ -35,11 +35,14 @@
 | merge | `chunking/merge.py` | → `merged.json`：在重叠区按时间约束做 LCS，拼成全局词序列 |
 | repair | `chunking/repair.py`（+ `align/` 强制对齐接口） | → `words.json`、`repair.json`：切点附近有问题时截取局部音频重识别 |
 | segment | `segment/` | → `sentences.json`（句子）、`aligned.json`（字幕条，带 `group`） |
-| translate | `translate/grouped.py` | → `translated.json`、`glossary.json`：整句翻译，再按字幕条分段 |
+| term_scan | `terms/`（可选） | → `term_candidates.json`、`term_review.json`：分块扫描术语、校验原文片段、关联实体 |
+| term_review | `terms/review.py`（可选） | 等待人工审核；没审核完时任务状态为 `awaiting_review`，审核完成后再次执行即继续 |
+| translate | `translate/grouped.py` | → `translated.json`、`glossary.json`（任务级术语表）：整句翻译，再按字幕条分段 |
 | write | `subtitle/formats.py` + `subtitle/style.py` | → `subtitles.<格式>`、`preview.vtt` |
 | burn | `media.burn_subtitles` | → `output.mp4` |
 
 - 已完成的阶段记录在 `state.json` 的 `completed` 里，再次运行时跳过；`Job.invalidate_from(stage)` 让某个阶段及之后的阶段重跑。
+- 术语扫描的两个阶段只在任务的 `term_mode` 为 `review` / `auto` 且需要翻译时启用。`term_review` 遇到未完成的审核时抛出 `pipeline.AwaitingReview`，`run()` 把任务记为 `awaiting_review` 并正常返回（不是错误），网页队列随即空出；修改审核结果只让翻译及之后的阶段重跑，不会重新识别。
 - 产物格式变化时把 `models.PIPELINE_VERSION` 加一，并在 `pipeline.MIGRATIONS` 里写明旧版本从哪个阶段开始重跑，避免用户重新识别（识别是最慢、最贵的一步）。
 - `audio.wav` 只在 vad / transcribe / repair 阶段需要，任务完成后删除；之后需要时会自动重新抽取。
 
@@ -55,7 +58,7 @@
 
 | 模块 | 职责 |
 | --- | --- |
-| `cli.py` | click 命令：run / transcribe / translate / burn / serve / passwd / jobs / doctor / context |
+| `cli.py` | click 命令：run / transcribe / translate / burn / serve / passwd / jobs / doctor / context / terms |
 | `web/` | 网页工作台：`app.py`（路由、任务队列、跨站与 Host 检查）、`templates/`、`static/` |
 | `settings.py` | 网页可修改的配置项（分组、校验、来源），按行写回配置文件并保留注释 |
 | `doctor.py` | 环境与配置检查，命令行 `doctor` 和网页设置页共用 |
@@ -74,14 +77,15 @@
 | `llm.py` | OpenAI 兼容对话客户端：重试、思考档位、OpenRouter 路由、用量统计 |
 | `segment/` | 断句：`llm.py`（LLM 断句与校验映射）、`rules.py`（规则兜底）、`cues.py`（句子 → 字幕条）、`timing.py`（纯文本模式的时间估算） |
 | `translate/` | 翻译：`base.py`（分批、编号、兜底）、`grouped.py`（整句翻译）、`openai_compat.py`、`fake.py` |
-| `glossary.py` | 背景资料（背景说明 + 可选的固定译法），保存在 `~/.config/yakumi/glossaries/`。界面和命令行叫“背景资料” / `context`，代码、文件和配置键沿用 glossary |
+| `glossary.py` | 背景资料（背景说明 + 可选的固定译法），保存在 `~/.config/yakumi/glossaries/`。界面和命令行叫“背景资料” / `context`，代码、文件和配置键沿用 glossary。固定译法以实体（`Entry`：规范名称、别名、类别、按语言的译名）为单位，兼容读取旧的 `[terms]`；`merge_entries` 按优先级合并，`TermSet` 为每一批翻译挑出相关的实体和审核确认的片段 |
+| `terms/` | 术语扫描与审核：`scanner.py`（分块、调用模型、提取候选）、`validator.py`（结构和原文定位校验）、`resolver.py`（去重、别名及实体关联）、`review.py`（审核数据、持久化、用于翻译、保存到背景资料） |
 | `subtitle/` | `formats.py`（SRT / VTT / ASS 读写）、`style.py`（中日文字幕标点惯例） |
 | `stats.py` | 把任务统计整理成一行摘要（请求数、兜底次数、费用） |
 
 ## 扩展点
 
 - **识别后端**：实现 `asr.base.ASRProvider`（`name`、`mode`、`capabilities()`、`transcribe()`），在 `asr/__init__.py` 的 `create_asr` 里注册。`capabilities()` 声明是否有词级时间戳、单次请求的窗口上限，分窗逻辑据此自动调整。
-- **翻译后端**：继承 `translate.base.Translator`，只需实现 `complete(system, user)`；分批、编号校验、整句翻译和兜底都是公共逻辑。
+- **翻译后端**：继承 `translate.base.Translator`，只需实现 `complete(system, user)`；分批、编号校验、整句翻译、按批附加术语和兜底都是公共逻辑。
 - **断句**：`segment.create_segmenter` 返回带 `split(words) -> list[Span]` 的对象。任何实现都必须满足“区间首尾相接、覆盖全部词”（`segment.common.check_spans`）。
 - **强制对齐**：实现 `align.Aligner`，返回与输入一一对应的词（`align.check_alignment` 会校验）。
 - **字幕格式**：在 `subtitle/formats.py` 的 `render` 里加分支，并加入 `FORMATS`。

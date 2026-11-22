@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from ..asr.types import Word
-from ..config import is_local_service, service_origin
+from ..config import LLM_INHERITED, inherited_llm_config, is_local_service
 from ..models import Segment
 from .common import Sentence, check_spans, join_texts, tokenize
 from .cues import build_cues, text_cues
@@ -15,20 +15,11 @@ from .timing import place_sentences
 Progress = Callable[[int, int], None]
 
 # 断句沿用 [translate] 的连接设置，密钥限于同一服务来源。
-INHERITED = ("provider", "base_url", "model", "api_key", "routing", "provider_routing", "timeout",
-              "reasoning_effort", "temperature")
+INHERITED = LLM_INHERITED
 
 
 def segment_llm_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    scfg = cfg.get("segment", {})
-    merged = dict(cfg.get("translate", {}))
-    upstream = service_origin(merged.get("base_url", ""))
-    if scfg.get("base_url") and (upstream is None or service_origin(scfg["base_url"]) != upstream):
-        merged.pop("api_key", None)
-    for key in INHERITED:
-        if scfg.get(key) not in (None, "", {}):
-            merged[key] = scfg[key]
-    return merged
+    return inherited_llm_config(cfg, "segment")
 
 
 def create_segmenter(cfg: dict[str, Any]) -> LLMSegmenter | RuleSegmenter:

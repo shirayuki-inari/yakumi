@@ -13,14 +13,19 @@ def format_stats(stats: dict[str, Any]) -> str:
         sections.append(_asr_section(stats))
     if stats.get("segment_mode"):
         sections.append(_segment_section(stats))
+    if "term_entities" in stats:
+        text = f"术语扫描：{stats['term_entities']} 个术语"
+        if stats.get("term_invalid"):
+            text += f"，{stats['term_invalid']} 条结果在原文里找不到"
+        sections.append(text)
     if stats.get("translate_requests"):
         sections.append(_translate_section(stats))
-    total = sum(stats.get(f"{k}_cost", 0) for k in ("asr", "repair", "segment", "translate"))
+    total = sum(stats.get(f"{k}_cost", 0) for k in ("asr", "repair", "segment", "terms", "translate"))
     cost = f"费用 ${total:.4f}"
-    unknown = sum(stats.get(f"{k}_cost_unknown", 0) for k in ("asr", "segment", "translate"))
+    unknown = sum(stats.get(f"{k}_cost_unknown", 0) for k in ("asr", "segment", "terms", "translate"))
     if unknown:
         cost += f"（另有 {unknown:g} 次未返回费用）"
-    if any(stats.get(f"{k}_failed") for k in ("asr", "repair", "segment", "translate")):
+    if any(stats.get(f"{k}_failed") for k in ("asr", "repair", "segment", "terms", "translate")):
         cost += "（失败请求的费用未计入）"
     return "；".join(sections + [cost])
 

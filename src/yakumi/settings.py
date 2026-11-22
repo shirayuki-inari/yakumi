@@ -23,8 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import (DEFAULTS, ENV_MAP, SERVICE_KEYS, ConfigError, build_config, config_files,
-                     read_config_file, service_origin, user_config_path)
+from .config import (DEFAULTS, ENV_MAP, LLM_SECTIONS, SERVICE_KEYS, ConfigError, build_config, config_files,
+                     inherited_llm_config, read_config_file, service_origin, user_config_path)
 
 REMOVE = object()
 
@@ -128,6 +128,21 @@ GROUPS: list[dict[str, Any]] = [
          Field("segment.cue_gap", "句内拆分停顿（秒）", "float", "同一句里停顿超过这么久，就拆成新的字幕条。",
                min=0.2, max=10),
      ]},
+    {"id": "terms", "title": "术语扫描", "icon": "scan-text",
+     "description": "翻译前让模型找出人名、昵称、作品名等（包括被识别写错的），人工审核后统一译名。"
+                    "新建任务时可以单独选择；这里设置默认做法和使用的模型。",
+     "fields": [
+         Field("terms.mode", "新任务默认", "choice", "人工审核时，任务会在翻译前暂停，审核完成后继续。",
+               choices=(("off", "不扫描"), ("review", "扫描后人工审核"), ("auto", "扫描，只自动采用与背景资料对应的结果"))),
+         Field("terms.model", "模型", "text", "留空时沿用翻译模型。",
+               suggestions=("deepseek/deepseek-v4.1-flash-1017", "google/gemini-3.8-flash")),
+         Field("terms.reasoning_effort", "思考档位", "choice",
+               "默认模型可选 low / high / none，没有 medium。", choices=(("", "沿用翻译设置"), *EFFORTS)),
+         Field("terms.base_url", "服务地址", "url", "留空时沿用翻译接口。", suggestions=SERVICE_URLS),
+         Field("terms.api_key", "API 密钥", "secret", "留空时沿用同一服务的翻译密钥。"),
+         Field("terms.chunk_chars", "每次请求的字数", "int", "长视频按这个长度分块扫描，相邻两块略有重叠。",
+               min=500, max=20000),
+     ]},
     {"id": "subtitle", "title": "字幕", "icon": "captions",
      "description": "新任务的默认导出设置，以及字幕条的长度和烧录样式。",
      "fields": [
@@ -181,7 +196,11 @@ READONLY = [
     ("download.extra_args", "yt-dlp 额外参数"),
     ("download.allow_private", "允许下载内网链接"),
 ]
-SERVICE_SECTIONS = ("asr", "translate", "segment")
+SERVICE_SECTIONS = ("asr", "translate", *LLM_SECTIONS)
+
+
+def _service_url(cfg: dict[str, Any], section: str) -> str:
+    return inherited_llm_config(cfg, section)["base_url"] if section in LLM_SECTIONS else cfg[section]["base_url"]
 
 
 # ---- 配置文件与来源 -----------------------------------------------------
@@ -217,14 +236,12 @@ def _layers(config_path: str | Path | None) -> list[tuple[Path, dict[str, Any]]]
 
 def describe(config_path: str | Path | None = None) -> dict[str, Any]:
     """设置页需要的全部信息：分组、每一项的当前值和来源，以及只读项。密钥只返回是否已设置。"""
-    from .segment import segment_llm_config
-
     layers = _layers(config_path)
     cfg = build_config([data for _, data in layers])
     target = config_target(config_path)
     target_data = next((data for path, data in layers if path == target), {})
     locks = _env_locks()
-    segment_effective = segment_llm_config(cfg)
+    inherited = {section: inherited_llm_config(cfg, section) for section in LLM_SECTIONS}
     # 从保存的文件里删除某一项之后会用的值（上一层配置或默认值）
     fallback = build_config([data for path, data in layers if path != target])
 
@@ -250,7 +267,7 @@ def describe(config_path: str | Path | None = None) -> dict[str, Any]:
                 "locked": f"由环境变量 {locks[f.id]} 设置，取消该变量后才能在这里修改" if f.id in locks else None,
             }
             if f.kind == "secret":
-                effective = segment_effective.get("api_key") if section == "segment" else cfg[section].get("api_key")
+                effective = (inherited[section] if section in inherited else cfg[section]).get("api_key")
                 item["set"] = bool(effective)
                 item["value"] = None
                 item["source"] = _secret_source(f.id, effective, layers, locks, config_path) if effective else ""
@@ -258,8 +275,8 @@ def describe(config_path: str | Path | None = None) -> dict[str, Any]:
                 item["value"] = cfg[section].get(key, DEFAULTS[section].get(key))
                 item["fallback"] = fallback[section].get(key, DEFAULTS[section].get(key))
                 item["source"] = source_of(f.id, item["value"])
-            if section == "segment" and key in ("model", "base_url") and not item["value"]:
-                item["placeholder"] = f"沿用翻译设置：{segment_effective.get(key, '')}"
+            if section in inherited and key in ("model", "base_url") and not item["value"]:
+                item["placeholder"] = f"沿用翻译设置：{inherited[section].get(key, '')}"
             fields.append(item)
         groups.append({k: v for k, v in group.items() if k != "fields"} | {"fields": fields})
 
@@ -292,7 +309,7 @@ def _secret_source(fid: str, effective: str, layers: list[tuple[Path, dict[str, 
         if _get(data, fid) == effective:
             return file_label(path, config_path)
     section = fid.split(".", 1)[0]
-    if section == "segment":
+    if section in LLM_SECTIONS:
         return "沿用翻译密钥"
     for env in SERVICE_KEYS.values():
         if os.environ.get(env) == effective:
@@ -362,8 +379,6 @@ class SaveResult:
 
 def save(config_path: str | Path | None, changes: dict[str, Any]) -> SaveResult:
     """校验并保存设置。`changes` 的键为“段.键”，值为 None 时从配置文件中删除这一项（恢复默认或上一层的值）。"""
-    from .segment import segment_llm_config
-
     if not isinstance(changes, dict) or not changes:
         raise SettingsError("没有需要保存的修改")
     locks = _env_locks()
@@ -391,8 +406,7 @@ def save(config_path: str | Path | None, changes: dict[str, Any]) -> SaveResult:
         key_id = f"{section}.api_key"
         if key_id in updates:
             continue
-        old_url = segment_llm_config(before)["base_url"] if section == "segment" else before[section]["base_url"]
-        new_url = segment_llm_config(after)["base_url"] if section == "segment" else after[section]["base_url"]
+        old_url, new_url = _service_url(before, section), _service_url(after, section)
         if service_origin(old_url) != service_origin(new_url) and _get(old_data, key_id) is not REMOVE:
             updates[key_id] = REMOVE
             title = next(g["title"] for g in GROUPS if g["id"] == section)

@@ -64,6 +64,18 @@ DEFAULTS: dict[str, Any] = {
         "concurrency": 4,
         "cue_gap": 1.2,  # 同一句内，停顿超过这么多秒就拆成新的字幕条
     },
+    "terms": {
+        # 术语扫描：翻译前让模型找出识别文本里的人名、昵称、作品名等，人工审核后统一译名
+        "mode": "off",  # 新任务的默认做法：off（不扫描）| review（扫描后暂停，等人工审核）| auto（只自动采用与背景资料对应的结果）
+        # 下面这些留空时沿用 [translate] 的设置：provider / base_url / api_key / routing / provider_routing 等
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        # 这个模型的思考档位为 max / high / low / none（没有 medium，不能沿用翻译的 medium）
+        "reasoning_effort": "low",
+        "temperature": 0,
+        "chunk_chars": 4000,  # 每次请求的文本长度（字）
+        "overlap_chars": 200,  # 相邻两块重叠的长度（字）
+        "concurrency": 4,
+    },
     "subtitle": {
         "max_chars": 42,
         "max_chars_cjk": 20,
@@ -152,6 +164,28 @@ def is_openrouter(url: str) -> bool:
     return service_origin(url) == ("https", "openrouter.ai", 443)
 
 
+# 断句、术语扫描沿用 [translate] 的连接设置；密钥只在同一服务来源下继承
+LLM_INHERITED = ("provider", "base_url", "model", "api_key", "routing", "provider_routing", "timeout",
+                 "reasoning_effort", "temperature")
+LLM_SECTIONS = ("segment", "terms")
+
+
+def inherited_llm_config(cfg: dict[str, Any], section: str) -> dict[str, Any]:
+    """[segment]、[terms] 这类调用对话模型的段：留空的连接设置沿用 [translate]。
+
+    换了服务地址（不同来源）时不继承翻译的密钥，避免把密钥发给别的服务。
+    """
+    own = cfg.get(section, {})
+    merged = dict(cfg.get("translate", {}))
+    upstream = service_origin(merged.get("base_url", ""))
+    if own.get("base_url") and (upstream is None or service_origin(own["base_url"]) != upstream):
+        merged.pop("api_key", None)
+    for key in LLM_INHERITED:
+        if own.get(key) not in (None, "", {}):
+            merged[key] = own[key]
+    return merged
+
+
 def is_local_service(url: str) -> bool:
     origin = service_origin(url)
     return origin is not None and origin[1] in ("localhost", "127.0.0.1", "::1")
@@ -176,6 +210,7 @@ def _service_origins(cfg: dict[str, Any]) -> dict[str, tuple[str, str, int] | No
         "asr": service_origin(cfg["asr"].get("base_url", "")),
         "translate": service_origin(translate_url),
         "segment": service_origin(cfg["segment"].get("base_url") or translate_url),
+        "terms": service_origin(cfg["terms"].get("base_url") or translate_url),
     }
 
 
@@ -188,7 +223,8 @@ def _merge_config(cfg: dict[str, Any], layer: dict[str, Any]) -> None:
 
 
 # 这些配置项的值是自由的键值表，不检查里面的键名
-FREE_TABLES = {("translate", "glossary"), ("translate", "provider_routing"), ("segment", "provider_routing")}
+FREE_TABLES = {("translate", "glossary"), ("translate", "provider_routing"), ("segment", "provider_routing"),
+               ("terms", "provider_routing")}
 
 
 class ConfigError(ValueError):
@@ -201,19 +237,13 @@ def unknown_keys(data: dict[str, Any], defaults: dict[str, Any] = DEFAULTS, pref
     for key, value in data.items():
         path = (*prefix, key)
         if key not in defaults and path not in FREE_TABLES:
-            # [segment] 可以覆盖 [translate] 的连接设置
-            if not (prefix == ("segment",) and key in defaults_inherited()):
+            # [segment]、[terms] 可以覆盖 [translate] 的连接设置
+            if not (len(prefix) == 1 and prefix[0] in LLM_SECTIONS and key in LLM_INHERITED):
                 found.append(".".join(path))
             continue
         if isinstance(value, dict) and isinstance(defaults.get(key), dict) and path not in FREE_TABLES:
             found.extend(unknown_keys(value, defaults[key], path))
     return found
-
-
-def defaults_inherited() -> set[str]:
-    from .segment import INHERITED
-
-    return set(INHERITED)
 
 
 def read_config_file(path: Path) -> dict[str, Any]:

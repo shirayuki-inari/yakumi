@@ -35,11 +35,13 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from .. import download as downloader, glossary as glossary_store, media, settings as settings_store
 from ..config import ConfigError, load_config
 from ..doctor import local_checks, online_checks, setup_problems
-from ..files import write_json
-from ..models import STAGES, JobState, Segment
+from ..files import read_json, write_json
+from ..models import STAGES, JobState, Segment, segments_from_list
 from ..stats import format_stats
 from ..pipeline import STAGE_LABELS, Job, JobBusyError, PipelineError, enabled_stages, first_stage, run
 from ..subtitle.formats import FORMATS, parse_srt
+from ..terms import MODES as TERM_MODES, sentences_from_cues
+from ..terms import review as term_review
 from ..translate.base import LANG_NAMES, lang_name
 from .auth import Auth
 from .browse import Browser, FileAccessError, make_roots
@@ -50,7 +52,8 @@ LANGUAGES = [
     ("it", "Italiano"), ("vi", "Tiếng Việt"), ("th", "ไทย"), ("id", "Bahasa Indonesia"), ("ar", "العربية"),
 ]
 LANG_CODES = {code for code, _ in LANGUAGES}
-STATUS_LABELS = {"pending": "排队中", "running": "处理中", "done": "已完成", "error": "失败"}
+STATUS_LABELS = {"pending": "排队中", "running": "处理中", "awaiting_review": "待审核", "done": "已完成",
+                 "error": "失败"}
 MEDIA_TYPES = {"srt": "application/x-subrip", "ass": "text/x-ssa", "vtt": "text/vtt"}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 SUBTITLE_SUFFIXES = (".srt", ".vtt")
@@ -174,7 +177,7 @@ def _steps(state: JobState) -> list[dict[str, str]]:
             status = "error"
         elif stage in state.completed:
             status = "done"
-        elif stage == state.stage and state.status == "running":
+        elif stage == state.stage and state.status in ("running", "awaiting_review"):
             status = "active"
         else:
             status = "todo"
@@ -338,6 +341,8 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
             data["name"] = json.loads(meta.read_text(encoding="utf-8")).get("name") or data["name"]
         data["busy"] = runner.busy(job.state.id)
         data["summary"] = format_stats(job.state.stats)
+        review = term_review.load_review(job.dir) if job.state.term_mode != "off" else None
+        data["terms"] = ({**review.summary(), "finished": review.finished} if review else None)
         data["files"] = {
             "subtitles": url_for("job_download", job_id=job.state.id, kind="subtitles")
             if "subtitles" in job.state.outputs else None,
@@ -349,7 +354,7 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
         return data
 
     def glossary_summaries() -> list[dict[str, Any]]:
-        return [{"id": g.id, "name": g.name, "count": len(g.terms),
+        return [{"id": g.id, "name": g.name, "count": len(g.entries),
                  "summary": g.notes.strip().splitlines()[0][:80] if g.notes.strip() else ""}
                 for g in glossary_store.list_all()]
 
@@ -372,6 +377,7 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
         sub = runner.cfg["subtitle"]
         return render_template("index.html", jobs=jobs, languages=LANGUAGES, glossaries=glossary_summaries(),
                                default_target="zh", default_bilingual=bool(sub["bilingual"]),
+                               default_terms=str(runner.cfg.get("terms", {}).get("mode", "off")),
                                default_format=sub["format"], formats=FORMATS,
                                problems=setup_problems(runner.cfg),
                                ytdlp=downloader.available(runner.cfg.get("download", {})))
@@ -381,7 +387,8 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
         job = load(job_id)
         data = view(job)
         return render_template("job.html", job=data, job_json=to_json(data),
-                               glossaries_json=to_json(glossary_summaries()))
+                               glossaries_json=to_json(glossary_summaries()),
+                               categories=glossary_store.CATEGORIES)
 
     @app.get("/settings")
     def settings_page():
@@ -395,7 +402,8 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
     def context_page():
         items = [g.to_dict() for g in glossary_store.list_all()]
         return render_template("context.html", glossaries=items, glossaries_json=to_json(items),
-                               glossaries_dir=str(glossary_store.glossaries_dir()))
+                               glossaries_dir=str(glossary_store.glossaries_dir()),
+                               categories=glossary_store.CATEGORIES, languages=LANGUAGES)
 
     @app.get("/glossaries")
     def legacy_glossaries_page():  # 旧地址
@@ -410,7 +418,8 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
             raise glossary_store.GlossaryError("数据格式不正确")
-        if not isinstance(body.get("terms", {}), (dict, list)) or not isinstance(body.get("notes", ""), str):
+        if (not isinstance(body.get("terms", {}), (dict, list)) or not isinstance(body.get("entries", []), list)
+                or not isinstance(body.get("notes", ""), str)):
             raise glossary_store.GlossaryError("数据格式不正确")
         return glossary_store.Glossary.from_dict(body)
 
@@ -545,6 +554,9 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
         except ValueError as exc:
             return bad_request(str(exc))
         notes = request.form.get("notes", "")[:4000]
+        term_mode = request.form.get("terms") or str(runner.cfg.get("terms", {}).get("mode", "off"))
+        if term_mode not in TERM_MODES:
+            return bad_request("不支持的术语扫描方式")
         segments, raw, sub_suffix = None, b"", ""
         if subtitles or sub_ref:
             sub_suffix = (sub_ref.suffix if sub_ref else Path(subtitles.filename).suffix).lower()
@@ -574,7 +586,8 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
         job = Job.create(workspace, tmp or video_ref, target or None, source,
                          bilingual=request.form.get("bilingual") == "true" and bool(target),
                          burn=request.form.get("burn") == "true" and has_video, fmt=fmt,
-                         move_video=tmp is not None, glossaries=glossaries, notes=notes, source_url=url)
+                         move_video=tmp is not None, glossaries=glossaries, notes=notes, source_url=url,
+                         term_mode=term_mode)
         with runner.reserve(job.state.id) as reservation:
             write_json(job.path("meta.json"), {"name": name, **({"url": url} if url else {})})
             if segments is not None:
@@ -697,6 +710,97 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
             # 背景资料的内容可能改过，即使选择没变也重新翻译。
             runner.submit(job, reservation, from_stage="translate")
         return jsonify(view(load(job_id)))
+
+    # ---- 术语审核 API ---------------------------------------------------
+    @app.get("/api/jobs/<job_id>/terms")
+    def api_terms(job_id: str):
+        """审核数据：实体、出现位置所在句子的原文和时间，以及可以保存到的背景资料。"""
+        job = load(job_id)
+        review = term_review.load_review(job.dir) if job.state.term_mode != "off" else None
+        data: dict[str, Any] = {"mode": job.state.term_mode, "revision": job.state.revision, "review": None,
+                                "glossaries": glossary_summaries(), "job_glossaries": job.state.glossaries}
+        if review is None:
+            return jsonify(data)
+        sentences = {}
+        if job.path("aligned.json").is_file():
+            wanted = {o.sentence_id for e in review.entities for o in e.occurrences}
+            sentences = {s.id: {"text": s.text, "start": s.start, "end": s.end}
+                         for s in sentences_from_cues(segments_from_list(read_json(job.path("aligned.json"))))
+                         if s.id in wanted}
+        found = read_json(job.path(term_review.CANDIDATES_FILE)) if job.path(term_review.CANDIDATES_FILE).is_file() else {}
+        data.update(review={**review.to_dict(), "summary": review.summary()}, sentences=sentences,
+                    invalid=len(found.get("invalid", [])), candidates=len(found.get("candidates", [])))
+        return jsonify(data)
+
+    @app.post("/api/jobs/<job_id>/terms")
+    def api_terms_save(job_id: str):
+        # 在释放任务之后再读取状态：没有重新处理时 busy 为 false，页面不会一直锁住
+        error = _terms_save(job_id)
+        return error if error is not None else jsonify(view(load(job_id)))
+
+    def _terms_save(job_id: str):
+        """保存审核结果。action：
+        - save：只保存；
+        - continue：结束审核（剩下待审核的不使用）并继续处理；翻译已经完成时重新翻译；
+        - scan：（重新）扫描术语，mode 为 review 或 auto；
+        - disable：不再使用术语扫描（审核数据保留）；任务停在扫描或审核时继续处理。
+        save_to 把通过的实体保存到背景资料：[{key, glossary}]。
+        """
+        with runner.reserve(job_id) as reservation:
+            job = load(job_id)
+            body = edit_body()
+            check_revision(job, body)
+            action = body.get("action", "save")
+            if action not in ("save", "continue", "scan", "disable"):
+                return bad_request("不支持的操作")
+            if not job.state.target_lang:
+                return bad_request("这个任务只做识别，没有翻译")
+            if action == "scan":
+                mode = body.get("mode", "review")
+                if mode not in ("review", "auto"):
+                    return bad_request("不支持的术语扫描方式")
+                job.migrate()
+                job.state.term_mode = mode
+                runner.submit(job, reservation, from_stage="term_scan")
+                return None
+            if action == "disable":
+                job.migrate()
+                stuck = job.state.status in ("error", "awaiting_review")
+                job.state.term_mode = "off"
+                if stuck:
+                    runner.submit(job, reservation)
+                else:
+                    job.save()
+                return None
+            review = term_review.load_review(job.dir) if job.state.term_mode != "off" else None
+            if review is None:
+                return bad_request("这个任务还没有术语扫描结果")
+            updates, merges, save_to = body.get("updates", []), body.get("merges", []), body.get("save_to", [])
+            if not all(isinstance(x, list) for x in (updates, merges, save_to)):
+                return bad_request("审核数据的格式不正确")
+            try:
+                for update in updates:
+                    term_review.apply_update(review, update)
+                for m in merges:
+                    if not isinstance(m, dict) or not isinstance(m.get("keys"), list):
+                        raise term_review.ReviewError("合并数据的格式不正确")
+                    term_review.merge(review, str(m.get("into")), [str(k) for k in m["keys"]])
+                for item in save_to:
+                    if not isinstance(item, dict):
+                        raise term_review.ReviewError("保存数据的格式不正确")
+                    gid = check_glossaries([item.get("glossary")])[0]
+                    term_review.save_to_library(review.find(str(item.get("key"))), gid, job.state.target_lang)
+            except (term_review.ReviewError, ValueError) as exc:
+                return bad_request(str(exc))
+            if action == "continue":
+                review.finished = True
+            term_review.save_review(job.dir, review)
+            if action == "continue":
+                job.migrate()
+                runner.submit(job, reservation, from_stage="translate" if "translate" in job.state.completed else None)
+            else:
+                job.save()
+        return None
 
     @app.get("/jobs/<job_id>/files/<name>")
     def job_file(job_id: str, name: str):

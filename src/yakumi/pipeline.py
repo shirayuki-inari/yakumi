@@ -1,4 +1,5 @@
-"""任务流水线：（download →）extract → vad → transcribe → merge → repair → segment → translate → write → burn。
+"""任务流水线：（download →）extract → vad → transcribe → merge → repair → segment →（term_scan → term_review →）
+translate → write → burn。
 
 每个任务对应一个目录（默认 .yakumi/jobs/<id>/），各阶段的产物都落盘：
 
@@ -10,13 +11,15 @@
     repair.json      边界复核记录；words.json 为复核后的最终结果
     sentences.json   断句结果：句子（翻译单位）及其词区间
     aligned.json     字幕条（显示单位），每条带所属句子的编号 group
+    term_candidates.json  术语扫描的候选和无效记录；term_review.json 为术语审核数据（见 terms/review.py）
     translated.json  带译文的字幕条（Web 编辑字幕时直接修改它）
-    glossary.json    翻译时实际用到的固定译法和背景说明（记录用）
+    glossary.json    任务级术语表：翻译时使用的实体、审核确认的出现记录和背景说明
     subtitles.<fmt>  导出的字幕；另有 preview.vtt 供网页预览
     output.mp4       烧录字幕后的视频
     state.json       任务状态
 
 已完成的阶段会跳过，识别阶段还会跳过已完成的窗口，所以中断后重新执行同一任务即可续跑。
+术语审核没有完成时，任务停在 term_review，状态为 awaiting_review；审核完成后再次执行即从翻译继续。
 """
 
 from __future__ import annotations
@@ -43,6 +46,10 @@ from .llm import record_usage
 from .models import PIPELINE_VERSION, STAGES, JobState, Segment, segments_from_list, segments_to_list
 from .segment import create_segmenter, segment_blocks, segment_words
 from .subtitle.formats import render
+from .terms import create_scanner, sentences_from_cues
+from .terms import review as term_review
+from .terms.resolver import resolve as resolve_terms
+from .terms.scanner import ScanContext
 from .translate import create_translator
 from .translate.grouped import group_by_punctuation, translate_cues
 
@@ -52,8 +59,8 @@ ProgressFn = Callable[[JobState], None]
 AUDIO_STAGES = {"vad", "transcribe", "repair"}
 
 # 各阶段在总进度里的占比
-WEIGHTS = {"download": 10, "extract": 3, "vad": 4, "transcribe": 34, "merge": 1, "repair": 3, "segment": 4, "translate": 34,
-           "write": 2, "burn": 14}
+WEIGHTS = {"download": 10, "extract": 3, "vad": 4, "transcribe": 34, "merge": 1, "repair": 3, "segment": 4,
+           "term_scan": 3, "term_review": 0, "translate": 34, "write": 2, "burn": 14}
 
 # 旧版本任务的迁移：版本号 → 从哪个阶段开始重跑（之前的产物格式没变，保留）。不在表里的版本从头重跑
 MIGRATIONS = {3: "segment"}  # 3 → 4：断句改为 LLM 断句 + 句内拆分，识别、合并、复核的结果不变
@@ -66,6 +73,8 @@ STAGE_LABELS = {
     "merge": "合并识别结果",
     "repair": "边界复核",
     "segment": "断句",
+    "term_scan": "术语扫描",
+    "term_review": "术语审核",
     "translate": "翻译字幕",
     "write": "生成字幕",
     "burn": "烧录字幕",
@@ -83,6 +92,10 @@ class JobBusyError(PipelineError):
     pass
 
 
+class AwaitingReview(Exception):
+    """术语审核还没有完成：任务暂停在 term_review，不是错误。"""
+
+
 def new_job_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
 
@@ -98,7 +111,7 @@ class Job:
                source_lang: str | None = None, bilingual: bool = False, burn: bool = False,
                fmt: str = "srt", move_video: bool = False, job_id: str | None = None,
                glossaries: list[str] | None = None, notes: str = "",
-               stage_inputs: dict[str, str] | None = None, source_url: str = "") -> "Job":
+               stage_inputs: dict[str, str] | None = None, source_url: str = "", term_mode: str = "off") -> "Job":
         """创建任务。`move_video` 为真时把视频移入任务目录（用于网页上传的临时文件）。
 
         `video` 为空时，要么是没有视频的字幕任务（之后用 `import_subtitles` 导入字幕），
@@ -111,7 +124,7 @@ class Job:
             source_lang=source_lang or None, bilingual=bilingual, burn=burn, format=fmt,
             created_at=now, updated_at=now, pipeline_version=PIPELINE_VERSION,
             glossaries=list(glossaries or []), notes=notes.strip(), stage_inputs=stage_inputs,
-            source_url=source_url,
+            source_url=source_url, term_mode=term_mode if target_lang else "off",
         )
         job = cls(root, state)
         job.dir.mkdir(parents=True, exist_ok=True)
@@ -209,7 +222,7 @@ class Job:
         group_by_punctuation(segments)
         write_json(self.path("aligned.json"), segments_to_list(segments))
         self.state.source_type = "subtitles"
-        self.state.completed = STAGES[:STAGES.index("translate")]
+        self.state.completed = STAGES[:STAGES.index("term_scan")]
         self.state.stats = {"imported_cues": len(segments)}
         self.save()
 
@@ -246,11 +259,14 @@ def enabled_stages(state: JobState) -> list[str]:
     """这个任务需要执行的阶段。导入的字幕跳过识别和断句；没有视频时不能烧录。"""
     stages = list(STAGES)
     if state.source_type == "subtitles":
-        stages = stages[STAGES.index("translate"):]
+        stages = stages[STAGES.index("term_scan"):]
     if not state.source_url and "download" in stages:
         stages.remove("download")
     if not state.target_lang:
         stages.remove("translate")
+    if not state.target_lang or state.term_mode not in ("review", "auto"):
+        stages.remove("term_scan")
+        stages.remove("term_review")
     if not state.burn or not (state.video or state.source_url):
         stages.remove("burn")
     return stages
@@ -299,6 +315,12 @@ def run(job: Job, cfg: dict[str, Any], progress: ProgressFn | None = None, force
             STAGE_FUNCS[stage](job, cfg, lambda f, m="", s=stage: report(s, f, m))
             state.completed.append(stage)
             done_weight += WEIGHTS[stage]
+    except AwaitingReview as exc:
+        state.status, state.stage, state.message = "awaiting_review", "term_review", str(exc)
+        _finish(job, cfg)
+        if progress:
+            progress(state)
+        return state
     except Exception as exc:  # 记录错误后继续抛出，由调用方决定如何展示
         state.status, state.error = "error", str(exc)
         state.message = f"{STAGE_LABELS.get(state.stage or '', '')}失败"
@@ -308,12 +330,16 @@ def run(job: Job, cfg: dict[str, Any], progress: ProgressFn | None = None, force
         raise
     state.status, state.stage, state.progress = "done", None, 1.0
     state.message = "完成"
-    if not cfg.get("workspace", {}).get("keep_audio", False):
-        job.path("audio.wav").unlink(missing_ok=True)  # 之后的校对和重新导出都用不到它
-    job.save()
+    _finish(job, cfg)
     if progress:
         progress(state)
     return state
+
+
+def _finish(job: Job, cfg: dict[str, Any]) -> None:
+    if not cfg.get("workspace", {}).get("keep_audio", False):
+        job.path("audio.wav").unlink(missing_ok=True)  # 之后的审核、校对和重新导出都用不到它
+    job.save()
 
 
 # ---- 各阶段 -----------------------------------------------------------
@@ -447,9 +473,66 @@ def _stage_segment(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
         record_usage(stats, "segment", segmenter.usage)
 
 
+def _job_title(job: Job) -> str:
+    meta = job.path("meta.json")
+    if meta.is_file():
+        name = str(read_json(meta).get("name") or "")
+        if name:
+            return Path(name).stem
+    return Path(job.state.video).stem if job.state.video else ""
+
+
+def _stage_term_scan(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
+    """扫描 → 校验 → 关联，写出候选和审核数据。重新扫描时保留已有的审核决定。"""
+    sentences = sentences_from_cues(segments_from_list(read_json(job.path("aligned.json"))))
+    try:
+        library, notes = glossary_store.resolve(cfg["translate"].get("glossary"), job.state.glossaries, job.state.notes)
+    except glossary_store.GlossaryError as exc:
+        raise PipelineError(str(exc)) from exc
+    base_notes = str(cfg["translate"].get("notes", "") or "").strip()
+    ctx = ScanContext(target=job.state.target_lang, title=_job_title(job),
+                      notes="\n\n".join(n for n in (base_notes, notes) if n), known=library)
+    scanner = create_scanner(cfg)
+    result = scanner.scan(sentences, ctx, progress=lambda d, n: report(d / max(1, n), f"术语扫描 {d}/{n}"))
+    write_json(job.path(term_review.CANDIDATES_FILE), {
+        "chunks": result.chunks, "failed_chunks": result.failed_chunks, "repairs": result.repairs,
+        "candidates": [c.to_dict() for c in result.candidates], "invalid": result.invalid,
+    })
+    review = term_review.Review(target=job.state.target_lang,
+                                entities=resolve_terms(result.candidates, sentences, library, job.state.target_lang))
+    term_review.carry_over(review, term_review.load_review(job.dir))
+    term_review.save_review(job.dir, review)
+    stats = job.state.stats
+    stats["term_candidates"], stats["term_entities"] = len(result.candidates), len(review.entities)
+    stats["term_invalid"] = len(result.invalid)
+    record_usage(stats, "terms", scanner.usage)
+
+
+def _stage_term_review(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
+    review = term_review.load_review(job.dir)
+    if review is None or review.finished:
+        return
+    if job.state.term_mode == "auto":
+        term_review.auto_approve(review)
+    elif not any(e.status == "pending" for e in review.entities):
+        review.finished = True
+    if review.finished:
+        term_review.save_review(job.dir, review)
+        return
+    pending = review.summary()["pending"]
+    raise AwaitingReview(f"发现 {len(review.entities)} 个术语，{pending} 个待审核")
+
+
+def job_terms(job: Job) -> tuple[list[glossary_store.Entry], list[dict[str, Any]]]:
+    """这个任务审核通过的术语（实体和出现记录）。没有启用术语扫描时为空。"""
+    if job.state.term_mode not in ("review", "auto"):
+        return [], []
+    return term_review.approved_terms(term_review.load_review(job.dir))
+
+
 def _stage_translate(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
     segments = segments_from_list(read_json(job.path("aligned.json")))
-    tcfg = translation_config(cfg["translate"], job.state.glossaries, job.state.notes)
+    tcfg = translation_config(cfg["translate"], job.state.glossaries, job.state.notes, job_terms(job))
     if job.state.source_type == "subtitles":
         tcfg["source_kind"] = "subtitle"  # 原文是已有的字幕，而不是语音识别结果
     translator = create_translator(tcfg, job.state.target_lang)
@@ -461,22 +544,37 @@ def _stage_translate(job: Job, cfg: dict[str, Any], report: StageReport) -> None
     for seg, text in zip(segments, texts):
         seg.translation = text
     write_json(job.path("translated.json"), segments_to_list(segments))
+    used = {e.id for e in translator.terms.used_entries()}
     write_json(job.path("glossary.json"), {
         "glossaries": job.state.glossaries,
-        "terms": translator.active_glossary if translator.active_glossary is not None else translator.glossary,
+        "target": job.state.target_lang,
+        "entries": [{**e, "used": e["id"] in used} for e in tcfg["glossary"]],
+        "occurrences": tcfg.get("term_occurrences", []),
         "notes": translator.notes,
     })
     record_translation_usage(job.state.stats, translator, tcfg, counters)
 
 
-def translation_config(tcfg: dict[str, Any], glossaries: list[str], notes: str) -> dict[str, Any]:
-    """把选用的背景资料和补充说明并入 [translate] 配置。找不到背景资料时报错。"""
+def translation_config(tcfg: dict[str, Any], glossaries: list[str], notes: str,
+                       job_terms: tuple[list[Any], list[dict[str, Any]]] | None = None) -> dict[str, Any]:
+    """把选用的背景资料、补充说明和任务的术语审核结果并入 [translate] 配置。找不到背景资料时报错。
+
+    实体的优先级：任务审核结果 ＞ 背景资料（后选的覆盖先选的）＞ 配置里的 [translate.glossary]。
+    返回的 glossary 是实体字典的列表，term_occurrences 是审核确认的出现记录，都可以直接序列化。
+    """
     try:
-        terms, extra = glossary_store.resolve(tcfg.get("glossary"), glossaries, notes)
+        entries, extra = glossary_store.resolve(tcfg.get("glossary"), glossaries, notes)
     except glossary_store.GlossaryError as exc:
         raise PipelineError(str(exc)) from exc
+    job_entries, occurrences = job_terms or ([], [])
+    if job_entries:
+        # 审核时改成了已有实体的名称、或两个新实体同名时会合并，出现记录要指向合并后的实体
+        id_map: dict[str, str] = {}
+        entries = glossary_store.merge_entries([entries, job_entries], id_map)
+        occurrences = [{**o, "entity": id_map.get(o["entity"], o["entity"])} for o in occurrences]
     base_notes = str(tcfg.get("notes", "") or "").strip()
-    return {**tcfg, "glossary": terms, "notes": "\n\n".join(n for n in (base_notes, extra) if n)}
+    return {**tcfg, "glossary": [e.to_dict() for e in entries], "term_occurrences": occurrences,
+            "notes": "\n\n".join(n for n in (base_notes, extra) if n)}
 
 
 def record_translation_usage(stats: dict[str, Any], translator: Any, tcfg: dict[str, Any],
@@ -518,6 +616,8 @@ STAGE_FUNCS: dict[str, Callable[[Job, dict[str, Any], StageReport], None]] = {
     "merge": _stage_merge,
     "repair": _stage_repair,
     "segment": _stage_segment,
+    "term_scan": _stage_term_scan,
+    "term_review": _stage_term_review,
     "translate": _stage_translate,
     "write": _stage_write,
     "burn": _stage_burn,

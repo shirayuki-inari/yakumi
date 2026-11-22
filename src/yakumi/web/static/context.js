@@ -1,4 +1,4 @@
-// 背景资料管理：列表、新建、编辑背景说明和固定译法、批量添加、删除。
+// 背景资料管理：列表、新建、编辑背景说明和固定译法（以实体为单位）、批量添加、合并建议、删除。
 (() => {
   const $ = (sel) => document.querySelector(sel);
   let glossaries = JSON.parse(document.getElementById("glossary-data").textContent);
@@ -40,7 +40,7 @@
       btn.dataset.id = g.id;
       btn.classList.toggle("selected", g.id === current);
       li.querySelector(".job-name").textContent = g.name;
-      const n = Object.keys(g.terms).length;
+      const n = g.entries.length;
       li.querySelector(".job-sub").textContent =
         [g.notes ? g.notes.split("\n")[0].slice(0, 40) : "没有背景说明", n ? `${n} 条固定译法` : ""].filter(Boolean).join(" · ");
       btn.addEventListener("click", () => open(g.id));
@@ -50,14 +50,39 @@
   }
 
   // ---- 编辑器 ---------------------------------------------------------
-  function addTerm(source = "", target = "", focus = false) {
-    const row = termTemplate.content.firstElementChild.cloneNode(true);
-    row.querySelector('[data-term="source"]').value = source;
-    row.querySelector('[data-term="target"]').value = target;
-    terms.append(row);
-    if (focus) row.querySelector("input").focus();
-    countTerms();
+  // 每条固定译法是一个实体：规范名称、类别、已确认的其他称呼、按语言的译名（"*" 表示任何语言）
+  const translationTemplate = $("[data-translation-template]");
+  const legacyNotice = $("[data-legacy-notice]");
+  const mergeHints = $("[data-merge-hints]");
+  const splitAliases = (text) => text.split(/[、,，;；]/).map((a) => a.trim()).filter(Boolean);
+
+  function addTranslation(card, lang = "*", text = "", focus = false) {
+    const row = translationTemplate.content.firstElementChild.cloneNode(true);
+    const select = row.querySelector("[data-lang]");
+    if (![...select.options].some((o) => o.value === lang)) select.append(new Option(lang, lang));
+    select.value = lang;
+    row.querySelector("[data-text]").value = text;
+    card.querySelector("[data-translations]").append(row);
+    if (focus) row.querySelector("[data-text]").focus();
     return row;
+  }
+
+  function addTerm(entry = null, focus = false) {
+    const card = termTemplate.content.firstElementChild.cloneNode(true);
+    card.dataset.id = entry?.id || "";
+    card.querySelector('[data-entry="canonical"]').value = entry?.canonical || "";
+    const category = card.querySelector('[data-entry="category"]');
+    if (entry?.category && ![...category.options].some((o) => o.value === entry.category)) {
+      category.append(new Option(entry.category, entry.category));
+    }
+    category.value = entry?.category || "";
+    card.querySelector('[data-entry="aliases"]').value = (entry?.aliases || []).join("、");
+    const translations = Object.entries(entry?.translations || { "*": "" });
+    for (const [lang, text] of translations) addTranslation(card, lang, text);
+    terms.append(card);
+    if (focus) card.querySelector("input").focus();
+    countTerms();
+    return card;
   }
 
   function countTerms() {
@@ -66,12 +91,69 @@
   }
 
   function collectTerms() {
-    return [...terms.querySelectorAll(".term-row")]
-      .map((row) => ({
-        source: row.querySelector('[data-term="source"]').value.trim(),
-        target: row.querySelector('[data-term="target"]').value.trim(),
-      }))
-      .filter((t) => t.source);
+    return [...terms.querySelectorAll(".entry-card")]
+      .map((card) => {
+        const translations = {};
+        card.querySelectorAll(".translation-row").forEach((row) => {
+          translations[row.querySelector("[data-lang]").value] = row.querySelector("[data-text]").value.trim();
+        });
+        return {
+          id: card.dataset.id || "",
+          canonical: card.querySelector('[data-entry="canonical"]').value.trim(),
+          category: card.querySelector('[data-entry="category"]').value,
+          aliases: splitAliases(card.querySelector('[data-entry="aliases"]').value),
+          translations,
+        };
+      })
+      .filter((t) => t.canonical);
+  }
+
+  // 译名相同的条目可能是同一实体的不同称呼：提示，由用户决定是否合并
+  function showMergeHints() {
+    const groups = new Map();
+    for (const card of terms.querySelectorAll(".entry-card")) {
+      const name = card.querySelector('[data-entry="canonical"]').value.trim();
+      if (!name) continue;
+      card.querySelectorAll(".translation-row").forEach((row) => {
+        const text = row.querySelector("[data-text]").value.trim();
+        if (!text) return;
+        const key = `${row.querySelector("[data-lang]").value}\u0000${text}`;
+        if (!groups.has(key)) groups.set(key, { text, cards: [] });
+        if (!groups.get(key).cards.includes(card)) groups.get(key).cards.push(card);
+      });
+    }
+    const hints = [...groups.values()].filter((g) => g.cards.length > 1);
+    mergeHints.replaceChildren();
+    for (const hint of hints) {
+      const names = hint.cards.map((c) => `「${c.querySelector('[data-entry="canonical"]').value.trim()}」`);
+      const line = document.createElement("div");
+      line.className = "merge-hint";
+      const text = document.createElement("span");
+      text.textContent = `${names.join("")}的译名都是“${hint.text}”，如果是同一实体的不同称呼，可以合并为一条。`;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "text-button";
+      btn.textContent = `合并到${names[0]}`;
+      btn.addEventListener("click", () => mergeCards(hint.cards));
+      line.append(text, btn);
+      mergeHints.append(line);
+    }
+    mergeHints.hidden = hints.length === 0;
+  }
+
+  function mergeCards(cards) {
+    const [target, ...rest] = cards;
+    const aliasInput = target.querySelector('[data-entry="aliases"]');
+    const canonical = target.querySelector('[data-entry="canonical"]').value.trim();
+    const aliases = splitAliases(aliasInput.value);
+    for (const card of rest) {
+      aliases.push(card.querySelector('[data-entry="canonical"]').value.trim(), ...splitAliases(card.querySelector('[data-entry="aliases"]').value));
+      card.remove();
+    }
+    aliasInput.value = [...new Set(aliases)].filter((a) => a && a !== canonical).join("、");
+    setDirty(true);
+    countTerms();
+    showMergeHints();
   }
 
   function open(id) {
@@ -82,8 +164,10 @@
     nameInput.value = g ? g.name : "";
     notesInput.value = g ? g.notes : "";
     terms.replaceChildren();
-    for (const [src, dst] of Object.entries(g ? g.terms : {})) addTerm(src, dst);
-    if (!g || !Object.keys(g.terms).length) addTerm();
+    for (const entry of g ? g.entries : []) addTerm(entry);
+    if (!g || !g.entries.length) addTerm();
+    legacyNotice.hidden = !g?.legacy;
+    showMergeHints();
     deleteBtn.hidden = !g;
     errorBox.hidden = true;
     editor.hidden = false;
@@ -101,34 +185,41 @@
     if (event.target === notesInput) autosize(notesInput);
     countTerms();
   });
+  editor.addEventListener("change", (event) => {
+    if (event.target.matches("select")) setDirty(true);
+    if (event.target.closest(".entry-card")) showMergeHints();
+  });
 
   terms.addEventListener("click", (event) => {
-    const btn = event.target.closest("[data-remove-term]");
-    if (!btn) return;
-    btn.closest(".term-row").remove();
-    if (!terms.children.length) addTerm();
+    const removeTerm = event.target.closest("[data-remove-term]");
+    const removeTranslation = event.target.closest("[data-remove-translation]");
+    const addLang = event.target.closest("[data-add-translation]");
+    if (removeTerm) {
+      removeTerm.closest(".entry-card").remove();
+      if (!terms.children.length) addTerm();
+    } else if (removeTranslation) {
+      removeTranslation.closest(".translation-row").remove();
+    } else if (addLang) {
+      const card = addLang.closest(".entry-card");
+      const used = new Set([...card.querySelectorAll("[data-lang]")].map((s) => s.value));
+      const next = [...translationTemplate.content.querySelector("[data-lang]").options].map((o) => o.value).find((v) => !used.has(v));
+      addTranslation(card, next || "*", "", true);
+    } else {
+      return;
+    }
     setDirty(true);
     countTerms();
+    showMergeHints();
   });
 
-  // 在最后一行的译文里按回车，直接新增一行
-  terms.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" || !event.target.matches("input")) return;
-    event.preventDefault();
-    const row = event.target.closest(".term-row");
-    if (event.target.dataset.term === "source") row.querySelector('[data-term="target"]').focus();
-    else if (row === terms.lastElementChild) addTerm("", "", true);
-    else row.nextElementSibling.querySelector("input").focus();
-  });
-
-  $("[data-add-term]").addEventListener("click", () => addTerm("", "", true));
+  $("[data-add-term]").addEventListener("click", () => addTerm(null, true));
   $("[data-new-glossary]").addEventListener("click", () => open(null));
 
-  // 批量添加：每行 “原文 = 译文”，也接受 Tab、逗号分隔（与命令行导入的规则一致）
+  // 批量添加：每行 “原文 = 译文”，也接受 Tab、逗号分隔（与命令行导入的规则一致），译名不限定语言
   $("[data-bulk-apply]").addEventListener("click", () => {
     const box = $("[data-bulk]");
     const existing = new Map(
-      [...terms.querySelectorAll(".term-row")].map((row) => [row.querySelector('[data-term="source"]').value.trim(), row]),
+      [...terms.querySelectorAll(".entry-card")].map((card) => [card.querySelector('[data-entry="canonical"]').value.trim(), card]),
     );
     let added = 0;
     for (let line of box.value.split("\n")) {
@@ -139,15 +230,18 @@
       const source = src.trim().replace(/^"|"$/g, "");
       const target = dst.trim().replace(/^"|"$/g, "");
       if (!source) continue;
-      const row = existing.get(source);
-      if (row) row.querySelector('[data-term="target"]').value = target;
-      else {
-        // 替换掉空白的占位行
-        const blank = [...terms.querySelectorAll(".term-row")].find(
-          (r) => !r.querySelector('[data-term="source"]').value.trim() && !r.querySelector('[data-term="target"]').value.trim(),
+      const card = existing.get(source);
+      if (card) {
+        const row = [...card.querySelectorAll(".translation-row")].find((r) => r.querySelector("[data-lang]").value === "*");
+        if (row) row.querySelector("[data-text]").value = target;
+        else addTranslation(card, "*", target);
+      } else {
+        // 替换掉空白的占位条目
+        const blank = [...terms.querySelectorAll(".entry-card")].find(
+          (c) => !c.querySelector('[data-entry="canonical"]').value.trim() && ![...c.querySelectorAll("[data-text]")].some((i) => i.value.trim()),
         );
         blank?.remove();
-        existing.set(source, addTerm(source, target));
+        existing.set(source, addTerm({ canonical: source, translations: { "*": target } }));
       }
       added += 1;
     }
@@ -155,6 +249,7 @@
       box.value = "";
       setDirty(true);
       countTerms();
+      showMergeHints();
     }
   });
 
@@ -168,15 +263,15 @@
     if (!name) return fail("请填写名称");
     const seen = new Set();
     const items = collectTerms();
-    const dup = items.find((t) => (seen.has(t.source) ? true : (seen.add(t.source), false)));
-    if (dup) return fail(`“${dup.source}”重复了`);
+    const dup = items.find((t) => (seen.has(t.canonical) ? true : (seen.add(t.canonical), false)));
+    if (dup) return fail(`“${dup.canonical}”重复了`);
     saveBtn.disabled = true;
     errorBox.hidden = true;
     try {
       const res = await fetch(current ? `/api/glossaries/${encodeURIComponent(current)}` : "/api/glossaries", {
         method: current ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, notes: notesInput.value, terms: items }),
+        body: JSON.stringify({ name, notes: notesInput.value, entries: items }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);

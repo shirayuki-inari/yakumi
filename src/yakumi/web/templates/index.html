@@ -144,6 +144,18 @@
           <span class="field-label">补充说明（只对这个任务有效，也会写进提示词）</span>
           <textarea name="notes" rows="3" maxlength="4000" placeholder="例如：这期是第一次 ASMR 直播；嘉宾是某某。"></textarea>
         </label>
+        <div class="context-terms">
+          <span class="field-label" id="terms-label">术语扫描</span>
+          <div class="select-wrap plain">
+            <select name="terms" aria-labelledby="terms-label" data-terms-mode>
+              <option value="off"{% if default_terms == "off" %} selected{% endif %}>不扫描</option>
+              <option value="review"{% if default_terms == "review" %} selected{% endif %}>扫描后暂停，人工审核</option>
+              <option value="auto"{% if default_terms == "auto" %} selected{% endif %}>扫描，只自动采用与背景资料对应的结果</option>
+            </select>
+            {{ icon("chevron-down", 16) }}
+          </div>
+          <p class="field-hint">翻译前让模型找出人名、昵称、作品名等（包括被识别写错的），审核后统一译名。会产生少量费用；审核期间任务暂停。</p>
+        </div>
       </div>
     </details>
     <div class="upload-progress" data-upload-progress hidden>

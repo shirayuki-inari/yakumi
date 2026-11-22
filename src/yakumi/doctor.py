@@ -67,6 +67,7 @@ def local_checks(cfg: dict[str, Any], config_path: str | Path | None = None) -> 
     checks.extend(_asr_checks(cfg["asr"]))
     checks.extend(_translate_checks(cfg))
     checks.extend(_segment_checks(cfg))
+    checks.extend(_terms_checks(cfg))
     checks.extend(_web_checks(cfg))
     punct = cfg["subtitle"].get("punctuation", "subtitle")
     checks.append(Check(INFO, "字幕标点：" + ("按字幕惯例（中日文句中逗号句号换成空格，行尾的去掉）"
@@ -175,6 +176,20 @@ def _segment_checks(cfg: dict[str, Any]) -> list[Check]:
     ]
 
 
+def _terms_checks(cfg: dict[str, Any]) -> list[Check]:
+    from .terms import terms_llm_config
+
+    group = "术语扫描"
+    mode = cfg.get("terms", {}).get("mode", "off")
+    label = {"off": "新任务默认不扫描", "review": "新任务默认扫描后人工审核", "auto": "新任务默认扫描并自动采用已知术语"}
+    lcfg = terms_llm_config(cfg)
+    checks = [Check(INFO, f"术语扫描：{label.get(mode, mode)}，模型 {lcfg.get('model')}", group=group)]
+    if lcfg.get("provider", "openai") == "openai":
+        checks.append(_check(bool(lcfg.get("api_key")) or is_local_service(lcfg["base_url"]), "术语扫描可以调用模型",
+                             "没有密钥，启用术语扫描的任务会失败", warn=mode == "off", group=group))
+    return checks
+
+
 def setup_problems(cfg: dict[str, Any]) -> list[Check]:
     """会让任务直接失败的配置问题（不检查 ffmpeg 以外的运行环境，也不联网），用于网页首页的提醒。"""
     checks = [_check(bool(shutil.which("ffmpeg")), "没有找到 ffmpeg", "请安装 ffmpeg", group="运行环境")]
@@ -210,6 +225,11 @@ def online_checks(cfg: dict[str, Any]) -> list[Check]:
         seg = segment_llm_config(cfg)
         if cfg.get("segment", {}).get("mode", "llm") == "llm" and is_openrouter(seg["base_url"]):
             checks.append(openrouter_model_check(seg, "断句", "segment.reasoning_effort"))
+    from .terms import terms_llm_config
+
+    terms = terms_llm_config(cfg)
+    if terms.get("provider", "openai") == "openai" and is_openrouter(terms["base_url"]):
+        checks.append(openrouter_model_check(terms, "术语扫描", "terms.reasoning_effort"))
     return checks
 
 

@@ -43,15 +43,17 @@
     <div class="editor-field">
       <div class="terms-heading">
         <span class="field-label">固定译法（可选） <span data-term-count></span></span>
-        <span class="field-hint flush">只在必须固定译法时添加，例如作品名、官方译名；原文里出现时才会放进提示词，译文留空表示保留原文</span>
+        <span class="field-hint flush">以人物、作品等实体为单位：规范名称、已确认的其他称呼、按语言的译名。只有原文里出现时才会放进提示词；译名留空表示保留原文</span>
       </div>
+      <p class="notice" data-legacy-notice hidden>这份背景资料是旧格式（每条“原文 = 译文”）。保存时会改写为新格式，每条成为一个实体，译名不限定语言，内容不变。</p>
+      <div class="notice merge-hints" data-merge-hints hidden></div>
       <div class="terms" data-terms></div>
       <div class="terms-actions">
         <button type="button" class="text-button" data-add-term>{{ icon("plus", 14) }}<span>添加固定译法</span></button>
       </div>
       <details class="bulk-add">
         <summary>批量添加</summary>
-        <textarea rows="4" data-bulk placeholder="每行一条：原文 = 译文（也可以用 Tab 或逗号分隔，直接从表格粘贴）"></textarea>
+        <textarea rows="4" data-bulk placeholder="每行一条：原文 = 译文（也可以用 Tab 或逗号分隔，直接从表格粘贴）。译名不限定语言"></textarea>
         <button type="button" class="secondary-button" data-bulk-apply>{{ icon("plus", 16) }}<span>添加到列表</span></button>
       </details>
     </div>
@@ -71,11 +73,34 @@
   </section>
 </div>
 <template data-term-template>
-  <div class="term-row">
-    <input class="text-input" type="text" data-term="source" placeholder="原文" aria-label="原文" />
-    <span class="term-arrow" aria-hidden="true">→</span>
-    <input class="text-input" type="text" data-term="target" placeholder="译文（留空保留原文）" aria-label="译文" />
-    <button type="button" class="icon-button" data-remove-term aria-label="删除这条固定译法">{{ icon("x", 16) }}</button>
+  <div class="entry-card">
+    <div class="entry-row">
+      <input class="text-input" type="text" maxlength="200" data-entry="canonical" placeholder="原文名称，例如：白上フブキ" aria-label="原文名称" />
+      <div class="select-wrap plain entry-category">
+        <select data-entry="category" aria-label="类别">
+          <option value="">类别</option>
+          {% for key, label in categories.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+        </select>
+        {{ icon("chevron-down", 16) }}
+      </div>
+      <button type="button" class="icon-button" data-remove-term aria-label="删除这条固定译法">{{ icon("x", 16) }}</button>
+    </div>
+    <input class="text-input" type="text" data-entry="aliases" placeholder="其他称呼（已确认的，用、分隔；可选）" aria-label="其他称呼" />
+    <div class="entry-translations" data-translations></div>
+    <button type="button" class="text-button" data-add-translation>{{ icon("plus", 14) }}<span>添加其他语言的译名</span></button>
+  </div>
+</template>
+<template data-translation-template>
+  <div class="translation-row">
+    <div class="select-wrap plain">
+      <select data-lang aria-label="目标语言">
+        <option value="*">任何语言</option>
+        {% for code, label in languages %}<option value="{{ code if code == 'zh-TW' else code|lower }}">{{ label }}</option>{% endfor %}
+      </select>
+      {{ icon("chevron-down", 16) }}
+    </div>
+    <input class="text-input" type="text" maxlength="200" data-text placeholder="译名（留空保留原文）" aria-label="译名" />
+    <button type="button" class="icon-button" data-remove-translation aria-label="删除这个译名">{{ icon("x", 16) }}</button>
   </div>
 </template>
 <template data-item-template>

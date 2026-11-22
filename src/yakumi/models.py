@@ -37,7 +37,8 @@ def segments_from_list(items: list[dict[str, Any]]) -> list[Segment]:
     return [Segment.from_dict(i) for i in items]
 
 
-STAGES = ["download", "extract", "vad", "transcribe", "merge", "repair", "segment", "translate", "write", "burn"]
+STAGES = ["download", "extract", "vad", "transcribe", "merge", "repair", "segment", "term_scan", "term_review",
+          "translate", "write", "burn"]
 # 阶段或产物格式变化时加一。旧任务载入时按 pipeline.MIGRATIONS 迁移，没有对应迁移规则时从头重跑
 PIPELINE_VERSION = 4
 
@@ -53,7 +54,7 @@ class JobState:
     bilingual: bool = False
     burn: bool = False
     format: str = "srt"
-    status: str = "pending"  # pending | running | done | error
+    status: str = "pending"  # pending | running | awaiting_review（等待术语审核）| done | error
     stage: str | None = None
     progress: float = 0.0
     message: str = ""
@@ -74,6 +75,8 @@ class JobState:
     source_type: str = "media"
     # 视频链接任务的原始链接；下载完成前 video 为空
     source_url: str = ""
+    # 术语扫描：off（不扫描）| review（扫描后等待人工审核）| auto（只自动采用与背景资料对应的结果）
+    term_mode: str = "off"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

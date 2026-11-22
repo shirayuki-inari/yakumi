@@ -16,9 +16,12 @@ import click
 from . import __version__, media
 from . import glossary as glossary_store
 from .config import ConfigError, load_config
-from .models import STAGES, JobState
-from .pipeline import STAGE_LABELS, Job, PipelineError, record_translation_usage, run, translation_config
+from .files import read_json
+from .models import STAGES, JobState, segments_from_list
+from .pipeline import STAGE_LABELS, Job, PipelineError, job_terms, record_translation_usage, run, translation_config
 from .segment import INHERITED, segment_llm_config
+from .terms import MODES as TERM_MODES, sentences_from_cues, terms_llm_config
+from .terms import review as term_review
 from .stats import format_stats
 from .subtitle.formats import FORMATS, read_subtitles, render
 from .translate import create_translator
@@ -78,11 +81,12 @@ def _check_glossaries(ids: tuple[str, ...]) -> list[str]:
 RUNTIME_ONLY = {
     "asr": {"api_key", "threads"},
     "segment": {"api_key", "timeout", "concurrency"},
+    "terms": {"api_key", "timeout", "concurrency"},
     "translate": {"api_key", "timeout"},
 }
 
 
-def _stage_inputs(cfg: dict[str, Any], state: JobState) -> dict[str, str]:
+def _stage_inputs(cfg: dict[str, Any], state: JobState, job: Job | None = None) -> dict[str, str]:
     """记录 CLI 各阶段的输入，续跑时只重做受变化影响的阶段。"""
     with open(state.video, "rb") as video:
         media_digest = hashlib.file_digest(video, "sha256").hexdigest()
@@ -111,24 +115,52 @@ def _stage_inputs(cfg: dict[str, Any], state: JobState) -> dict[str, str]:
         "burn": [state.burn, style, subtitle.get("fonts_dir")] if state.burn else False,
     }
     if state.target_lang:
-        translation = translation_config(cfg["translate"], state.glossaries, state.notes)
-        for key in RUNTIME_ONLY["translate"]:
-            translation.pop(key, None)
-        translation["glossary"] = list(translation["glossary"].items())
-        inputs["translate"] = translation
-    return {stage: hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
-            for stage, value in inputs.items()}
+        inputs["translate"] = _translate_inputs(cfg, state, job)
+        if state.term_mode in ("review", "auto"):
+            scan = {key: val for key, val in cfg["terms"].items()
+                    if key not in INHERITED and key not in RUNTIME_ONLY["terms"] and key != "mode"}
+            llm = terms_llm_config(cfg)
+            scan.update({key: llm.get(key) for key in INHERITED if key not in RUNTIME_ONLY["terms"]})
+            inputs["term_scan"] = [state.term_mode, scan]
+    return {stage: _digest(value) for stage, value in inputs.items()}
+
+
+def _translate_inputs(cfg: dict[str, Any], state: JobState, job: Job | None) -> dict[str, Any]:
+    terms = job_terms(job) if job is not None else None
+    translation = translation_config(cfg["translate"], state.glossaries, state.notes, terms)
+    for key in RUNTIME_ONLY["translate"]:
+        translation.pop(key, None)
+    translation["glossary"] = _glossary_fingerprint(translation["glossary"])
+    if not translation["term_occurrences"]:
+        translation.pop("term_occurrences")
+    return translation
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _glossary_fingerprint(entries: list[dict[str, Any]]) -> list[Any]:
+    """固定译法的指纹。只有旧格式能表达的内容（名称 → 不限语言的译名）时沿用旧的写法，
+    升级后续跑旧任务不会因为指纹格式变化而重新翻译。"""
+    simple = all(e["id"] == e["canonical"] and not e["aliases"] and not e["category"]
+                 and set(e["translations"]) == {glossary_store.ANY_LANG} for e in entries)
+    if simple:
+        return [[e["canonical"], e["translations"][glossary_store.ANY_LANG]] for e in entries]
+    return entries
 
 
 def _update_job_inputs(job: Job, cfg: dict[str, Any], bilingual: bool, burn: bool, fmt: str,
-                       glossaries: list[str] | None, notes: str | None) -> None:
+                       glossaries: list[str] | None, notes: str | None, term_mode: str | None = None) -> None:
     st = job.state
     st.bilingual, st.burn, st.format = bilingual, burn, fmt
     if glossaries is not None:
         st.glossaries = glossaries
     if notes is not None:
         st.notes = notes.strip()
-    current = _stage_inputs(cfg, st)
+    if term_mode is not None and st.target_lang:
+        st.term_mode = term_mode
+    current = _stage_inputs(cfg, st, job)
     previous, st.stage_inputs = st.stage_inputs or {}, current
     changed = next((stage for stage in STAGES if previous.get(stage) != current.get(stage)), None)
     if previous and changed:
@@ -141,7 +173,7 @@ def _update_job_inputs(job: Job, cfg: dict[str, Any], bilingual: bool, burn: boo
 @contextmanager
 def _prepare_job(cfg: dict[str, Any], video: Path, target: str | None, source: str | None,
                  bilingual: bool, burn: bool, fmt: str, force: bool, glossaries: list[str] | None = None,
-                 notes: str | None = None) -> Iterator[Job]:
+                 notes: str | None = None, term_mode: str | None = None) -> Iterator[Job]:
     workspace = cfg["workspace"]["dir"]
     previous = None if force else _find_job(workspace, video, target, source)
     reuse = previous is not None and previous.stage_inputs is not None
@@ -152,12 +184,14 @@ def _prepare_job(cfg: dict[str, Any], video: Path, target: str | None, source: s
             if previous is not None:
                 glossaries = previous.glossaries if glossaries is None else glossaries
                 notes = previous.notes if notes is None else notes
+                term_mode = previous.term_mode if term_mode is None else term_mode
             job_id = Job.create(workspace, video, target, source, bilingual, burn, fmt,
-                                glossaries=glossaries, notes=notes or "", stage_inputs={}).state.id
+                                glossaries=glossaries, notes=notes or "", stage_inputs={},
+                                term_mode=term_mode or str(cfg["terms"].get("mode", "off"))).state.id
         with Job.lock(workspace, job_id):
             job = Job.load(workspace, job_id, migrate=False)
             job.migrate()
-            _update_job_inputs(job, cfg, bilingual, burn, fmt, glossaries, notes)
+            _update_job_inputs(job, cfg, bilingual, burn, fmt, glossaries, notes, term_mode)
             if reuse:
                 completed = "、".join(STAGE_LABELS[s] for s in job.state.completed) or "无"
                 click.echo(f"沿用任务 {job_id}（已完成：{completed}）", err=True)
@@ -166,14 +200,25 @@ def _prepare_job(cfg: dict[str, Any], video: Path, target: str | None, source: s
         raise click.ClickException(str(exc)) from exc
 
 
-def _execute(cfg: dict[str, Any], job: Job) -> None:
+def _execute(cfg: dict[str, Any], job: Job) -> bool:
+    """执行任务。停下来等待术语审核时返回 False。"""
     try:
         run(job, cfg, progress=_progress_printer())
     except Exception as exc:
         raise click.ClickException(f"{exc}\n任务目录：{job.dir}\n重新执行同一命令即可从中断处继续。") from exc
+    if job.state.status == "awaiting_review":
+        click.echo(f"{job.state.message}。请审核：yakumi terms review {job.state.id}\n"
+                   "审核完成后重新执行同一命令，从翻译继续（也可以在网页工作台审核）。", err=True)
+        return False
+    st = job.state
+    if st.target_lang and st.term_mode in ("review", "auto") and st.stage_inputs is not None:
+        # 术语审核的结果在这次运行中才产生（自动通过等），翻译指纹按实际使用的结果更新，下次不会误判为有变化
+        st.stage_inputs["translate"] = _digest(_translate_inputs(cfg, st, job))
+        job.save()
     summary = format_stats(job.state.stats)
     if summary:
         click.echo(summary, err=True)
+    return True
 
 
 def _export(job: Job, out_dir: Path, stem: str, tag: str) -> list[Path]:
@@ -197,6 +242,9 @@ source_option = click.option("-s", "--source", default=None, help="原视频语�
 format_option = click.option("--format", "fmt", type=click.Choice(FORMATS), default=None, help="字幕格式。")
 notes_option = click.option("--notes", default=None,
                             help="只对这个任务有效的补充说明，会写进翻译提示词，例如“这期是第一次 ASMR 直播”。")
+terms_option = click.option("--terms", "term_mode", type=click.Choice(TERM_MODES), default=None,
+                            help="术语扫描：off 不扫描；review 扫描后暂停，等人工审核（yakumi terms review）；"
+                                 "auto 只自动采用与背景资料对应的结果。默认取配置 terms.mode。")
 
 
 def context_option(f):
@@ -232,6 +280,7 @@ def main(ctx: click.Context, config: str | None) -> None:
 @format_option
 @context_option
 @notes_option
+@terms_option
 @asr_option
 @model_option
 @translator_option
@@ -239,16 +288,17 @@ def main(ctx: click.Context, config: str | None) -> None:
               help="输出目录，默认与视频同目录。")
 @click.option("--force", is_flag=True, help="不复用之前的结果，从头开始。")
 @click.pass_context
-def run_cmd(ctx, video: Path, target, source, bilingual, burn, fmt, glossaries, notes, asr_provider, model,
-            translate_provider, out_dir, force):
+def run_cmd(ctx, video: Path, target, source, bilingual, burn, fmt, glossaries, notes, term_mode, asr_provider,
+            model, translate_provider, out_dir, force):
     """识别、翻译并导出字幕（可选烧录）。"""
     cfg = _cfg(ctx, asr={"provider": asr_provider},
                translate={"model": model, "provider": translate_provider})
     bilingual = cfg["subtitle"]["bilingual"] if bilingual is None else bilingual
     fmt = fmt or cfg["subtitle"]["format"]
     ids = _check_glossaries(glossaries) if glossaries else None
-    with _prepare_job(cfg, video, target, source, bilingual, burn, fmt, force, ids, notes) as job:
-        _execute(cfg, job)
+    with _prepare_job(cfg, video, target, source, bilingual, burn, fmt, force, ids, notes, term_mode) as job:
+        if not _execute(cfg, job):
+            return
         for path in _export(job, out_dir or video.parent, video.stem, target):
             click.echo(str(path))
 
@@ -357,7 +407,7 @@ def context():
     \b
     每份背景资料包含：
       背景说明  一两句话说明这是谁的什么内容，原样写进翻译提示词（核心）
-      固定译法  可选，原文 → 译文，只在必须固定译法时添加
+      固定译法  可选，以实体为单位：规范名称、已确认的别名、按目标语言的译名
     保存在 ~/.config/yakumi/glossaries/，翻译时用 -x 选用。
     """
 
@@ -369,6 +419,24 @@ def _load_context(name: str) -> glossary_store.Glossary:
         raise click.ClickException(str(exc)) from exc
 
 
+def _save_context(g: glossary_store.Glossary) -> None:
+    try:
+        glossary_store.save(g)
+    except glossary_store.GlossaryError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _describe_entry(e: glossary_store.Entry) -> str:
+    langs = "，".join(f"{'任何语言' if k == glossary_store.ANY_LANG else k}：{v or '（保留原文）'}"
+                     for k, v in e.translations.items()) or "（未指定译名）"
+    extra = [glossary_store.CATEGORIES.get(e.category, e.category)] if e.category else []
+    if e.aliases:
+        extra.append("又称 " + "、".join(e.aliases))
+    if e.id != e.canonical:
+        extra.append(f"id {e.id}")
+    return f"{e.canonical} → {langs}" + (f"  （{'；'.join(extra)}）" if extra else "")
+
+
 @context.command("list")
 def context_list():
     """列出所有背景资料。"""
@@ -378,7 +446,7 @@ def context_list():
                    f"保存在 {glossary_store.glossaries_dir()}")
     for g in items:
         notes = g.notes.splitlines()[0][:30] if g.notes else "（没有背景说明）"
-        click.echo(f"{g.id}  {notes}" + (f"  · {len(g.terms)} 条固定译法" if g.terms else ""))
+        click.echo(f"{g.id}  {notes}" + (f"  · {len(g.entries)} 条固定译法" if g.entries else ""))
 
 
 @context.command("show")
@@ -386,11 +454,15 @@ def context_list():
 def context_show(name):
     """显示一份背景资料。"""
     g = _load_context(name)
-    click.echo(f"# {g.name}（{glossary_store.path_of(g.id)}）")
+    click.echo(f"# {g.name}（{glossary_store.path_of(g.id)}）" + ("  旧格式，保存时会改写为新格式" if g.legacy else ""))
     click.echo(f"\n背景说明：\n{g.notes or '（无）'}")
-    click.echo(f"\n固定译法（{len(g.terms)} 条）：")
-    for k, v in g.terms.items():
-        click.echo(f"  {k} → {v or '（保留原文）'}")
+    click.echo(f"\n固定译法（{len(g.entries)} 条）：")
+    for e in g.entries:
+        click.echo(f"  {_describe_entry(e)}")
+    for s in glossary_store.merge_suggestions(g.entries):
+        names = "、".join(s["ids"])
+        click.echo(click.style(f"\n提示：{names} 的译名都是“{s['translation']}”，如果是同一实体的不同称呼，"
+                               f"可以用 yakumi context merge {g.id} {' '.join(s['ids'])} 合并", fg="yellow"))
 
 
 def _get_or_new(name: str) -> glossary_store.Glossary:
@@ -416,42 +488,84 @@ def context_notes(name, text, file):
         raise click.ClickException("请提供背景说明文字，或用 -f 指定文件")
     g = _get_or_new(name)
     g.notes = text.strip()
-    glossary_store.save(g)
+    _save_context(g)
 
 
 @context.command("set")
 @click.argument("name")
 @click.argument("source")
 @click.argument("target", default="")
-def context_set(name, source, target):
-    """添加或修改一条固定译法（背景资料不存在时自动创建）。译文留空表示保留原文。"""
+@click.option("-l", "--lang", default="*", show_default=True,
+              help="译名对应的目标语言，如 zh、zh-TW、en；* 表示任何语言。")
+@click.option("-a", "--alias", "aliases", multiple=True, help="已确认的其他称呼（可以重复指定）。")
+@click.option("--category", type=click.Choice(list(glossary_store.CATEGORIES)), default=None, help="类别。")
+def context_set(name, source, target, lang, aliases, category):
+    """添加或修改一条固定译法（背景资料不存在时自动创建）。译文留空表示保留原文。
+
+    SOURCE 是已有实体的名称或别名时，修改这个实体；否则以 SOURCE 为规范名称新建。
+    """
     g = _get_or_new(name)
-    g.terms[source.strip()] = target.strip()
-    glossary_store.save(g)
-    click.echo(f"{g.id}：{source} → {target or '（保留原文）'}")
+    entry = g.find(source.strip())
+    try:
+        if entry is None:
+            entry = glossary_store.Entry(canonical=glossary_store._clean(source, "名称"))
+            if not entry.canonical:
+                raise click.ClickException("名称不能为空")
+            g.entries.append(entry)
+        entry.translations[glossary_store.norm_lang(lang)] = glossary_store._clean(target, "译名")
+    except glossary_store.GlossaryError as exc:
+        raise click.ClickException(str(exc)) from exc
+    entry.aliases = [a for a in dict.fromkeys([*entry.aliases, *(x.strip() for x in aliases)])
+                     if a and a != entry.canonical]
+    if category:
+        entry.category = category
+    _save_context(g)
+    click.echo(f"{g.id}：{_describe_entry(entry)}")
 
 
 @context.command("unset")
 @click.argument("name")
 @click.argument("source")
 def context_unset(name, source):
-    """删除一条固定译法。"""
+    """删除一条固定译法；SOURCE 是某个实体的别名时，只删除这个别名。"""
     g = _load_context(name)
-    if g.terms.pop(source, None) is None:
+    entry = g.find(source)
+    if entry is None:
         raise click.ClickException(f"{g.id} 里没有“{source}”")
-    glossary_store.save(g)
+    if source in entry.aliases:
+        entry.aliases.remove(source)
+    else:
+        g.entries.remove(entry)
+    _save_context(g)
+
+
+@context.command("merge")
+@click.argument("name")
+@click.argument("target")
+@click.argument("sources", nargs=-1, required=True)
+def context_merge(name, target, sources):
+    """把几条固定译法合并为同一实体：SOURCES 的名称和别名成为 TARGET 的别名。"""
+    g = _load_context(name)
+    found = [g.find(x) for x in (target, *sources)]
+    missing = [x for x, e in zip((target, *sources), found) if e is None]
+    if missing:
+        raise click.ClickException(f"{g.id} 里没有：{'、'.join(missing)}")
+    entry = glossary_store.merge_into(g, found[0].id, [e.id for e in found[1:]])
+    _save_context(g)
+    click.echo(f"{g.id}：{_describe_entry(entry)}")
 
 
 @context.command("import")
 @click.argument("name")
 @click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 def context_import(name, file):
-    """从 CSV / TSV / “原文 = 译文” 文本文件导入固定译法（一行一条，追加到背景资料）。"""
+    """从 CSV / TSV / “原文 = 译文” 文本文件导入固定译法（一行一条，译名不限定语言，追加到背景资料）。"""
     g = _get_or_new(name)
     terms = glossary_store.import_terms(file.read_text(encoding="utf-8-sig"))
-    g.terms.update(terms)
-    glossary_store.save(g)
-    click.echo(f"{g.id}：导入 {len(terms)} 条，共 {len(g.terms)} 条固定译法")
+    for entry in glossary_store.entries_from_terms(terms):
+        g.upsert(entry)
+    _save_context(g)
+    click.echo(f"{g.id}：导入 {len(terms)} 条，共 {len(g.entries)} 条固定译法")
 
 
 @context.command("delete")
@@ -468,6 +582,177 @@ def context_delete(name):
 # 旧命令名 yakumi glossary 仍然可用（不在帮助里显示）
 main.add_command(click.Group("glossary", commands=context.commands, hidden=True,
                              help="旧名称，请改用 yakumi context。"))
+
+
+# ---- 术语审核 ---------------------------------------------------------------
+STATUS_TEXT = {"pending": "待审核", "approved": "通过", "rejected": "拒绝"}
+
+
+@main.group()
+def terms():
+    """审核任务的术语扫描结果（任务用 yakumi run --terms review 启用扫描）。
+
+    \b
+    yakumi terms show <任务>     列出扫描到的术语
+    yakumi terms review <任务>   逐个审核待审核的术语
+    yakumi terms set <任务> <序号> --approve / --reject / --canonical … / --translation …
+    yakumi terms done <任务>     结束审核（剩下的待审核术语不使用）
+    审核结束后重新执行原来的 yakumi run 命令，从翻译继续。审核结果只对这个任务有效，
+    可以用 --save-to 把通过的术语保存到背景资料。
+    """
+
+
+@contextmanager
+def _review_of(ctx: click.Context, job_id: str, write: bool = True) -> Iterator[tuple[Job, term_review.Review]]:
+    cfg = _cfg(ctx)
+    workspace = cfg["workspace"]["dir"]
+    try:
+        with Job.lock(workspace, job_id) if write else _nullcontext():
+            job = Job.load(workspace, job_id, migrate=False)
+            review = term_review.load_review(job.dir)
+            if review is None:
+                raise click.ClickException("这个任务还没有术语扫描结果（用 yakumi run --terms review 启用）")
+            yield job, review
+            if write:
+                term_review.save_review(job.dir, review)
+                job.save()
+    except (PipelineError, term_review.ReviewError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@contextmanager
+def _nullcontext() -> Iterator[None]:
+    yield
+
+
+def _context_lines(job: Job, e: term_review.ReviewEntity, limit: int = 3) -> list[str]:
+    texts = {s.id: s.text for s in sentences_from_cues(segments_from_list(read_json(job.path("aligned.json"))))}
+    lines = []
+    for o in e.occurrences[:limit]:
+        text = texts.get(o.sentence_id, "")
+        mark = text.replace(o.surface, click.style(o.surface, bold=True, underline=True), 1)
+        flag = "（已排除）" if o.status == "rejected" else ""
+        tenths = round(o.start * 10)  # 先取整到 0.1 秒，避免 59.96 显示成 00:60.0
+        lines.append(f"    {tenths // 600:02d}:{tenths % 600 / 10:04.1f}  {mark}{flag}")
+    if len(e.occurrences) > limit:
+        lines.append(f"    …… 共 {len(e.occurrences)} 处")
+    return lines
+
+
+def _entity_line(n: int, e: term_review.ReviewEntity) -> str:
+    surfaces = "、".join(e.surfaces)
+    name = e.canonical or "（未确定规范名称）"
+    tr = e.translation if e.translation is not None else "（未定译名）"
+    tags = [glossary_store.CATEGORIES.get(e.category, e.category), f"置信度 {e.confidence}"]
+    if e.library_id:
+        tags.append("对应背景资料" + ("，自动通过" if e.auto else ""))
+    return (f"{n:>3}. [{STATUS_TEXT[e.status]}] {surfaces} → {name} → {tr}  （{'，'.join(tags)}，"
+            f"{len(e.occurrences)} 处）")
+
+
+@terms.command("show")
+@click.argument("job_id")
+@click.option("--all", "show_all", is_flag=True, help="同时显示出现位置。")
+@click.pass_context
+def terms_show(ctx, job_id, show_all):
+    """列出扫描到的术语和审核状态。"""
+    with _review_of(ctx, job_id, write=False) as (job, review):
+        s = review.summary()
+        click.echo(f"共 {s['total']} 个术语：待审核 {s['pending']}，通过 {s['approved']}，拒绝 {s['rejected']}"
+                   + ("；审核已结束" if review.finished else ""))
+        for n, e in enumerate(review.entities, 1):
+            click.echo(_entity_line(n, e))
+            if show_all:
+                for line in _context_lines(job, e, limit=10):
+                    click.echo(line)
+
+
+def _save_to(e: term_review.ReviewEntity, save_to: str | None, target: str) -> None:
+    if save_to and e.status == "approved" and e.canonical:
+        term_review.save_to_library(e, glossary_store.glossary_id(save_to), target)
+        click.echo(f"    已保存到背景资料“{save_to}”")
+
+
+@terms.command("set")
+@click.argument("job_id")
+@click.argument("refs", nargs=-1, required=True)
+@click.option("--approve", "status", flag_value="approved", help="通过。")
+@click.option("--reject", "status", flag_value="rejected", help="拒绝。")
+@click.option("--pending", "status", flag_value="pending", help="改回待审核。")
+@click.option("--canonical", default=None, help="规范名称。")
+@click.option("--translation", default=None, help="译名。")
+@click.option("--category", type=click.Choice(list(glossary_store.CATEGORIES)), default=None)
+@click.option("--alias", "aliases", multiple=True, help="保存到背景资料时一并保存的已确认别名。")
+@click.option("--merge-into", default=None, help="把这些术语合并到另一个术语（序号）。")
+@click.option("--save-to", default=None, help="通过后保存到这份背景资料。")
+@click.pass_context
+def terms_set(ctx, job_id, refs, status, canonical, translation, category, aliases, merge_into, save_to):
+    """修改术语（REFS 为 terms show 列出的序号，可以多个）。"""
+    with _review_of(ctx, job_id) as (job, review):
+        targets = [review.by_number(r) for r in refs]
+        if merge_into:
+            into = review.by_number(merge_into)
+            term_review.merge(review, into.key, [e.key for e in targets])
+            targets = [into]
+        for e in targets:
+            update: dict[str, Any] = {"key": e.key}
+            for key, value in (("status", status), ("canonical", canonical), ("translation", translation),
+                               ("category", category)):
+                if value is not None:
+                    update[key] = value
+            if aliases:
+                update["aliases"] = list(aliases)
+            term_review.apply_update(review, update)
+            click.echo(_entity_line(review.entities.index(e) + 1, e))
+            _save_to(e, save_to, job.state.target_lang)
+
+
+@terms.command("review")
+@click.argument("job_id")
+@click.option("--save-to", default=None, help="把通过的术语保存到这份背景资料（可以之后在其他任务里复用）。")
+@click.pass_context
+def terms_review(ctx, job_id, save_to):
+    """逐个审核待审核的术语：通过、修改、拒绝或跳过。"""
+    with _review_of(ctx, job_id) as (job, review):
+        pending = [e for e in review.entities if e.status == "pending"]
+        if not pending:
+            click.echo("没有待审核的术语。")
+        for e in pending:
+            click.echo("")
+            click.echo(_entity_line(review.entities.index(e) + 1, e))
+            if e.evidence:
+                click.echo(f"    依据：{e.evidence[0]}")
+            for line in _context_lines(job, e):
+                click.echo(line)
+            choice = click.prompt("  [a] 通过  [e] 修改后通过  [r] 拒绝  [s] 跳过  [q] 退出",
+                                  type=click.Choice(["a", "e", "r", "s", "q"]), default="a", show_choices=False)
+            if choice == "q":
+                break
+            if choice == "s":
+                continue
+            update: dict[str, Any] = {"key": e.key, "status": "rejected" if choice == "r" else "approved"}
+            if choice == "e":
+                update["canonical"] = click.prompt("    规范名称", default=e.canonical or "", show_default=bool(e.canonical))
+                update["translation"] = click.prompt("    译名", default=e.translation or "",
+                                                     show_default=e.translation is not None)
+            term_review.apply_update(review, update)
+            _save_to(e, save_to, job.state.target_lang)
+        left = review.summary()["pending"]
+        if not review.finished and click.confirm(
+                "结束审核？" + (f"剩下 {left} 个待审核的术语不会使用。" if left else ""), default=not left):
+            review.finished = True
+            click.echo("审核已结束。重新执行原来的 yakumi run 命令，从翻译继续。")
+
+
+@terms.command("done")
+@click.argument("job_id")
+@click.pass_context
+def terms_done(ctx, job_id):
+    """结束审核：剩下待审核的术语不使用。之后重新执行 yakumi run 即从翻译继续。"""
+    with _review_of(ctx, job_id) as (_job, review):
+        review.finished = True
+        left = review.summary()["pending"]
+        click.echo("审核已结束" + (f"，{left} 个待审核的术语不会使用" if left else "") + "。")
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}

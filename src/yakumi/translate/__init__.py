@@ -13,6 +13,7 @@ def create_translator(cfg: dict[str, Any], target: str = "zh") -> Translator:
         "concurrency": int(cfg.get("concurrency", 1)),
         "notes": str(cfg.get("notes", "") or ""),
         "source_kind": str(cfg.get("source_kind", "asr")),
+        "term_occurrences": cfg.get("term_occurrences") or None,
     }
     provider = cfg.get("provider", "openai")
     if provider == "openai":

@@ -144,13 +144,15 @@ class SentenceTranslator:
                    systems: tuple[str, str]) -> list[list[str]]:
         grouped_sys, plain_sys = systems
         texts = [[cues[i].text.replace(SEP, " ") for i in g] for g in batch]
+        sids = [cues[g[0]].group for g in batch]  # 句子编号，用来匹配任务审核的术语记录
         results: list[list[str] | None] = [None] * len(batch)
         pending = list(range(len(batch)))
         for attempt in range(2):
             if not pending:
                 break
             lines = [SEP.join(texts[p]) for p in pending]
-            parsed = parse_numbered(self.tr.complete(grouped_sys, self.tr.batch_prompt(lines, context)))
+            terms = self.tr.term_block([join_texts(texts[p]) for p in pending], [sids[p] for p in pending])
+            parsed = parse_numbered(self.tr.complete(grouped_sys, self.tr.batch_prompt(lines, context, terms)))
             still = []
             for n, p in enumerate(pending, 1):
                 parts = split_parts(parsed.get(n, ""), len(batch[p]))
@@ -162,20 +164,21 @@ class SentenceTranslator:
                 self._count("split_retries", len(still))
             pending = still
         if pending:
-            whole = self.tr.run_batch(plain_sys, [join_texts(texts[p]) for p in pending], context)
+            whole = self.tr.run_batch(plain_sys, [join_texts(texts[p]) for p in pending], context,
+                                      [sids[p] for p in pending])
             for p, sentence in zip(pending, whole):
                 parts = split_translation(sentence, [len(t) for t in texts[p]])
                 if parts is not None:
                     self._count("split_proportional")
                 else:
-                    parts = self.tr.run_batch(plain_sys, texts[p], context)
+                    parts = self.tr.run_batch(plain_sys, texts[p], context, [sids[p]] * len(texts[p]))
                     self._count("split_per_cue")
                 results[p] = parts
         return [r or [] for r in results]
 
     def translate(self, cues: list[Segment], target: str, source: str | None = None,
                   progress: Progress | None = None) -> list[str]:
-        self.tr.prepare([c.text for c in cues])
+        self.tr.prepare(target)
         systems = (self.tr.build_prompt(target, source, GROUPED_RULES), self.tr.system_prompt(target, source))
         groups = group_cues(cues)
         self._count("sentences", len(groups))
@@ -228,7 +231,8 @@ def translate_cues(translator: Translator, cues: list[Segment], target: str, sou
                    progress: Progress | None = None) -> tuple[list[str], dict[str, Any]]:
     """按配置的翻译单位翻译字幕条，返回每条的译文和兜底计数。"""
     if unit == "cue":
-        return translator.translate([c.text for c in cues], target, source, progress=progress), {}
+        return translator.translate([c.text for c in cues], target, source, progress=progress,
+                                    ids=[c.group for c in cues]), {}
     if unit != "sentence":
         raise ValueError(f"未知的翻译单位：{unit}（可选 sentence / cue）")
     st = SentenceTranslator(translator, batch_sentences)

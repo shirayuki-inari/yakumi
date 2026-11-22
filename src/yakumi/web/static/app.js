@@ -156,13 +156,16 @@
   function showContext() {
     const n = form.querySelectorAll('input[name="glossaries"]:checked').length;
     const notes = form.querySelector('textarea[name="notes"]').value.trim();
+    const terms = form.querySelector("[data-terms-mode]").value;
     const parts = [];
     if (n) parts.push(`${n} 份背景资料`);
     if (notes) parts.push("有补充说明");
+    if (terms !== "off") parts.push(terms === "review" ? "扫描并审核术语" : "扫描术语");
     contextCount.textContent = parts.length ? `· ${parts.join("，")}` : "";
   }
   context.addEventListener("input", showContext);
   context.addEventListener("change", showContext);
+  showContext();
 
   // ---- 服务器文件浏览 -----------------------------------------------------
   const browser = document.querySelector("[data-browser]");
@@ -279,6 +282,7 @@
     if (!target.value) {
       data.delete("glossaries");
       data.delete("notes");
+      data.set("terms", "off");
     }
     errorBox.hidden = true;
     progressBox.hidden = false;

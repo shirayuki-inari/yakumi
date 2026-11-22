@@ -74,6 +74,11 @@
         {{ icon("languages", 16) }}<span>重新翻译</span>
       </button>
       <p class="field-hint">按当前选择的背景资料和补充说明重新翻译，不会重新识别。校对过的译文会被覆盖。</p>
+      <button type="button" class="secondary-button wide" data-scan-terms>
+        {{ icon("scan-text", 16) }}<span>{% if job.term_mode == "off" %}扫描术语{% else %}重新扫描术语{% endif %}</span>
+      </button>
+      <p class="field-hint">让模型找出人名、昵称、作品名等（包括被识别写错的），审核后统一译名。只影响翻译，不会重新识别；已有的审核决定会保留。
+        <button type="button" class="text-button inline-link" data-disable-terms{% if job.term_mode == "off" %} hidden{% endif %}>不再使用术语扫描</button></p>
     </div>
     {% endif %}
 
@@ -118,6 +123,30 @@
     </div>
     {% endif %}
 
+    {% if job.target_lang %}
+    <div class="control-panel terms-panel" data-terms-panel hidden>
+      <div class="editor-heading">
+        <h2>术语审核 <span class="edited-badge" data-terms-dirty hidden>· 有未保存的修改</span></h2>
+        <span class="export-format" data-terms-count></span>
+      </div>
+      <p class="notice" data-terms-notice hidden></p>
+      <div class="segmented terms-filter" role="tablist" data-terms-filter>
+        <button type="button" role="tab" data-value="pending">待审核</button>
+        <button type="button" role="tab" data-value="approved">已通过</button>
+        <button type="button" role="tab" data-value="rejected">已拒绝</button>
+        <button type="button" role="tab" data-value="all">全部</button>
+      </div>
+      <div class="term-list" data-term-list></div>
+      <p class="field-hint flush terms-empty" data-terms-empty hidden></p>
+      <p class="notice error" data-terms-error hidden></p>
+      <div class="terms-footer">
+        <button type="button" class="secondary-button" data-terms-save>{{ icon("save", 16) }}<span>保存审核</span></button>
+        <button type="button" class="primary" data-terms-continue>{{ icon("arrow-right", 16) }}<span>完成审核，继续翻译</span></button>
+      </div>
+      <p class="field-hint" data-terms-hint>审核结果只对这个任务有效：通过的术语按位置提示给翻译模型，不会改动字幕原文。需要在其他视频里复用时，可以保存到背景资料。</p>
+    </div>
+    {% endif %}
+
     <div class="control-panel editor-panel">
       <div class="editor-heading">
         <h2>字幕校对 <span class="edited-badge" data-edited hidden>· 有未保存的修改</span></h2>
@@ -133,5 +162,7 @@
 </div>
 <script type="application/json" id="job-data">{{ job_json|safe }}</script>
 <script type="application/json" id="glossary-data">{{ glossaries_json|safe }}</script>
+<script type="application/json" id="category-data">{{ categories.items()|list|tojson }}</script>
 {% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='job.js') }}"></script>{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='job.js') }}"></script>
+<script src="{{ url_for('static', filename='terms.js') }}"></script>{% endblock %}

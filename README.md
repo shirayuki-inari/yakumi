@@ -11,6 +11,7 @@
 - **长视频可靠**：在停顿处切分；找不到停顿时重叠切分，并按时间对齐去重；高风险的切点会截取局部音频重新识别。
 - **按句翻译**：模型按语义断句（不改动任何文字），整句翻译后再按字幕条分段，语序不同的语言之间也通顺。
 - **背景资料**：按频道、节目保存一两句背景说明（写进翻译提示词）和可选的固定译法，在多个视频里复用。
+- **术语扫描与审核**（可选）：翻译前让模型找出人名、昵称、作品名等，包括被识别写错的写法；人工确认后按位置提示给翻译模型，统一译名，不改动字幕原文。
 - **后端可插拔**：识别和翻译都走 OpenAI 兼容接口，默认用 OpenRouter，也可以接本地的 whisper.cpp、Ollama 等。
 - **依赖少**：核心只需要 `click`、`httpx`、`flask` 和 ffmpeg；装了 onnxruntime 时启用 Silero VAD。
 - **断点续跑**：每个阶段、每个识别窗口的结果都会保存，中断后重新执行同一命令即可从断点继续。
@@ -98,6 +99,10 @@ yakumi translate talk.en.srt -t zh
 # 使用背景资料，并补充只对这个视频有效的说明
 yakumi run stream.mp4 -t zh -x 我的频道 --notes "这期是第一次 ASMR 直播"
 
+# 翻译前扫描术语，暂停等待审核；审核完成后重新执行同一命令，从翻译继续
+yakumi run stream.mp4 -t zh -x 我的频道 --terms review
+yakumi terms review <任务 ID>
+
 # 把字幕烧录进视频
 yakumi burn talk.mp4 talk.zh.srt
 
@@ -130,7 +135,7 @@ unit = "cue"          # 逐条翻译（旧的方式）
 翻译提示词会告诉模型：原文是**不可靠的语音识别结果**，可能有同音误写、漏字、断错的句子，人名和专有名词尤其容易写错，要结合上下文按说话人的本意翻译。所以多数情况下，只要让模型知道**这是谁的什么内容**就够了，它自己能认出被写错的名字并统一译法。这类背景按频道、节目保存成**背景资料**，在多个视频里复用。每份背景资料包含：
 
 - **背景说明**（核心）：一两句话说明主播、节目、粉丝名等，原样写进翻译提示词。例如：“hololive 秘密结社 holoX 成员博衣こより（博衣小夜璃）的 ASMR 直播，粉丝名为“助手くん”（助手君）。” 实测这一句就让 こよ / ジョシュ君 / じゃしくん 等写法统一译成了“小夜璃”“助手君”；
-- **固定译法**（可选）：原文 → 译文，只在必须固定译法时添加，例如作品名、官方译名。翻译时只把原文里出现过的放进提示词。
+- **固定译法**（可选）：以实体为单位，包括规范名称、已确认的其他称呼（别名）、类别，以及按目标语言的译名，只在必须固定译法时添加，例如作品名、官方译名。翻译时每一批只附上这一批原文里出现过的实体。
 
 任务还可以填写只对这个视频有效的**补充说明**，例如“这期是第一次 ASMR 直播”，同样写进提示词。
 
@@ -138,13 +143,57 @@ unit = "cue"          # 逐条翻译（旧的方式）
 
 ```bash
 yakumi context notes 我的频道 "VTuber 的直播，粉丝名为“助手くん”（助手君）"   # 不存在时自动创建
-yakumi context set 我的频道 原文 译文            # 需要固定译法时再加
+yakumi context set 我的频道 原文 译文            # 需要固定译法时再加（译名不限定语言）
+yakumi context set 我的频道 白上フブキ 白上吹雪 -l zh -a フブちゃん --category person
+yakumi context merge 我的频道 白上フブキ フブキ   # 把几条合并成同一实体：后者成为别名
 yakumi context import 我的频道 terms.csv         # 批量导入固定译法：每行“原文,译文”，也支持 Tab 和“原文 = 译文”
 yakumi context list
-yakumi context show 我的频道
+yakumi context show 我的频道                      # 译名相同的条目会提示是否合并
 ```
 
-背景资料保存在 `~/.config/yakumi/glossaries/<名称>.toml`，也可以直接编辑。配置文件里 `[translate]` 的 `notes`（全局背景说明）和 `[translate.glossary]`（全局固定译法）对所有任务生效，与选用的背景资料合并（背景资料优先）。旧的 `yakumi glossary` 命令和 `-g` 选项仍然可用。
+背景资料保存在 `~/.config/yakumi/glossaries/<名称>.toml`，也可以直接编辑：
+
+```toml
+version = 2
+name = "hololive"
+notes = "VTuber 直播常用术语"
+
+[[entries]]
+id = "shirakami-fubuki"            # 可省略，默认等于 canonical
+canonical = "白上フブキ"
+category = "person"                 # person / group / fan_name / work / song / game / place / term / other
+aliases = ["フブキ", "フブちゃん"]   # 只放确认过、适合长期复用的称呼
+translations = { "zh" = "白上吹雪" } # 按目标语言；"*" 表示任何语言，空字符串表示保留原文
+```
+
+语言代码 `zh`、`zh-CN`、`zh-Hans` 视为同一种，`zh-TW`、`zh-Hant` 视为同一种。旧格式（`[terms]` 下“原文 = 译文”）照常读取，每条成为一个实体、译名不限定语言，保存时改写为新格式；译名相同的旧条目只会提示合并，不会自动合并。
+
+配置文件里 `[translate]` 的 `notes`（全局背景说明）和 `[translate.glossary]`（全局固定译法，“原文 = 译文”）对所有任务生效。实体按 id 或规范名称合并，优先级为：任务的术语审核结果 ＞ 选用的背景资料（后选的覆盖先选的）＞ 全局配置。旧的 `yakumi glossary` 命令和 `-g` 选项仍然可用。
+
+### 术语扫描与审核
+
+背景说明能解决大多数名字问题。内容涉及很多人物、作品，或者需要逐个确认译名时，可以在翻译前做一次术语扫描：
+
+1. **扫描**：按约 4000 字分块（相邻两块略有重叠），连同视频标题、背景说明和已知的固定译法交给模型（默认 `deepseek/deepseek-v4.1-flash-1017`，可在 `[terms]` 或网页设置里修改），找出人名、昵称、团体、作品、歌曲、游戏、粉丝称呼和社区用语，包括被识别写错的写法。模型不确定时，规范名称和译名留空。
+2. **校验与关联**：每个结果都必须是对应句子里逐字存在的片段，找不到时做一次定向修复，仍然不行的记为异常、不使用。同一实体的不同称呼并在一起，优先对应到背景资料里已有的实体；同一称呼在其他句子里的出现位置会自动补全。只由已确认的名称或别名逐字匹配到的实体直接标为通过。
+3. **审核**：任务暂停（状态“待审核”），在任务页的“术语审核”里逐个**通过、修改或拒绝**，可以单独排除某一处出现，也可以把几个候选合并。点“完成审核，继续翻译”后，还在待审核的不会使用。
+4. **翻译**：通过的术语按句子位置提示给翻译模型，例如“第 3 行的「博士小寄り」指「博衣こより」”，字幕原文不会被改动。每一批只附上与这一批有关的术语。
+
+审核结果只对这个任务有效，保存在任务目录的 `term_review.json`。可以把通过的实体“保存到背景资料”，只会保存规范名称、你确认的别名和这种语言的译名，识别错误的写法不会进入背景资料。
+
+新建任务时在“背景资料与补充说明”里选择术语扫描方式；已完成的任务可以在任务页点“扫描术语”，扫描和审核后重新翻译，不会重新识别。三种方式：`off` 不扫描（默认）、`review` 扫描后人工审核、`auto` 不暂停，只自动采用对应到背景资料已有实体的结果。命令行：
+
+```bash
+yakumi run stream.mp4 -t zh --terms review     # 扫描后暂停
+yakumi terms show <任务 ID> [--all]             # 列出术语（--all 显示出现位置）
+yakumi terms review <任务 ID> [--save-to 我的频道]   # 逐个审核：通过 / 修改后通过 / 拒绝 / 跳过
+yakumi terms set <任务 ID> 3 --approve --translation 博衣小夜璃
+yakumi terms set <任务 ID> 5 --merge-into 3     # 把第 5 个合并到第 3 个
+yakumi terms done <任务 ID>                     # 结束审核
+yakumi run stream.mp4 -t zh --terms review     # 再次执行，从翻译继续
+```
+
+审核结果改了之后再执行 `yakumi run`，只会重新翻译。
 
 ### 字幕标点
 
@@ -232,7 +281,8 @@ yakumi serve --host 0.0.0.0     # 对其他设备开放；没有设置密码时�
 
 ```
 vad.json  windows.json  pieces/  merged.json  repair.json  words.json
-sentences.json  aligned.json  translated.json  glossary.json  subtitles.srt  preview.vtt  output.mp4  state.json
+sentences.json  aligned.json  term_candidates.json  term_review.json  translated.json  glossary.json
+subtitles.srt  preview.vtt  output.mp4  state.json
 ```
 
 ## 使用本地模型

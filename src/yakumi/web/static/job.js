@@ -53,10 +53,13 @@
 
   // ---- 状态 -----------------------------------------------------------
   const busy = () => job.busy || job.status === "running" || job.status === "pending";
+  const scanBtn = $("[data-scan-terms]");
 
   function setEditorBusy() {
     const locked = submitting || busy();
-    renderBtn.disabled = locked;
+    // 等待术语审核时，在“术语审核”里完成审核后继续，而不是重新生成
+    renderBtn.disabled = locked || job.status === "awaiting_review";
+    if (scanBtn) scanBtn.disabled = locked;
     if (retranslateBtn) retranslateBtn.disabled = locked;
     if (restartBtn) restartBtn.disabled = locked;
     deleteBtn.disabled = locked;
@@ -70,6 +73,7 @@
     bar.style.width = `${job.status === "done" ? 100 : pct}%`;
     if (job.status === "done") progressText.textContent = "已完成，可以校对字幕并下载";
     else if (job.status === "error") progressText.textContent = job.message || "处理失败";
+    else if (job.status === "awaiting_review") progressText.textContent = `${job.message}，审核后继续翻译`;
     else progressText.textContent = `${job.message || "排队中"} · ${pct}%`;
     const summary = $("[data-summary]");
     summary.textContent = job.summary || "";
@@ -85,7 +89,72 @@
       link.hidden = !url || busy();
       if (url) link.href = url;
     }
+    document.dispatchEvent(new CustomEvent("yakumi:job-state", { detail: job }));
   }
+
+  // 术语审核面板（terms.js）保存后换上新的任务版本
+  document.addEventListener("yakumi:job-refresh", (event) => {
+    // 保存审核不改动字幕，正在校对的字幕仍然基于最新版本
+    if (loadedFor === job.revision) loadedFor = event.detail.revision;
+    job = event.detail;
+    showState();
+  });
+
+  // 术语审核面板（terms.js）提交后，任务重新开始处理
+  document.addEventListener("yakumi:job-submitted", (event) => {
+    job = event.detail;
+    job.busy = true;
+    setDirty(false);
+    loadedFor = null;
+    showState();
+    poll();
+  });
+
+  const disableTermsBtn = $("[data-disable-terms]");
+  disableTermsBtn?.addEventListener("click", async () => {
+    if (submitting || busy()) return;
+    if (!window.confirm("之后的翻译不再使用术语扫描和审核结果（审核数据会保留，可以重新扫描）。确定吗？")) return;
+    submitting = true;
+    setEditorBusy();
+    try {
+      const data = await post(`/api/jobs/${job.id}/terms`, { revision: job.revision, action: "disable" });
+      disableTermsBtn.hidden = true;
+      scanBtn.querySelector("span").textContent = "扫描术语";
+      const panel = document.querySelector("[data-terms-panel]");
+      if (panel) panel.hidden = true;
+      if (data.status === "pending") document.dispatchEvent(new CustomEvent("yakumi:job-submitted", { detail: data }));
+      else document.dispatchEvent(new CustomEvent("yakumi:job-refresh", { detail: data }));
+    } catch (err) {
+      errorBox.textContent = `操作失败：${err.message}`;
+      errorBox.hidden = false;
+    } finally {
+      submitting = false;
+      setEditorBusy();
+    }
+  });
+
+  scanBtn?.addEventListener("click", async () => {
+    if (submitting || busy()) return;
+    const again = job.term_mode !== "off";
+    const message = again
+      ? "重新扫描术语会产生费用，已有的审核决定会保留。扫描完成后需要审核，然后重新翻译。确定继续吗？"
+      : "扫描术语会产生费用。扫描完成后任务会暂停，等你审核术语后再重新翻译。确定继续吗？";
+    if (!window.confirm(message)) return;
+    submitting = true;
+    setEditorBusy();
+    try {
+      const data = await post(`/api/jobs/${job.id}/terms`, { revision: job.revision, action: "scan", mode: "review" });
+      scanBtn.querySelector("span").textContent = "重新扫描术语";
+      if (disableTermsBtn) disableTermsBtn.hidden = false;
+      document.dispatchEvent(new CustomEvent("yakumi:job-submitted", { detail: data }));
+    } catch (err) {
+      errorBox.textContent = `扫描术语失败：${err.message}`;
+      errorBox.hidden = false;
+    } finally {
+      submitting = false;
+      setEditorBusy();
+    }
+  });
 
   async function poll() {
     clearTimeout(pollTimer);
@@ -144,10 +213,10 @@
   }
 
   // ---- 字幕校对 -------------------------------------------------------
+  // 先取整到 0.1 秒，避免 59.96 显示成 00:60.0
   const fmtTime = (t) => {
-    const m = Math.floor(t / 60);
-    const s = (t % 60).toFixed(1).padStart(4, "0");
-    return `${String(m).padStart(2, "0")}:${s}`;
+    const tenths = Math.round(t * 10);
+    return `${String(Math.floor(tenths / 600)).padStart(2, "0")}:${((tenths % 600) / 10).toFixed(1).padStart(4, "0")}`;
   };
 
   function autosize(el) {

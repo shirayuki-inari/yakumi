@@ -120,7 +120,16 @@ def test_glossary_api_and_page(app):
     resp = client.post("/api/glossaries", json={"name": "主播", "notes": "VTuber",
                                                 "terms": [{"source": "こより", "target": "可萝莉"},
                                                           {"source": " ", "target": "空的会被忽略"}]})
-    assert resp.status_code == 201 and resp.get_json()["terms"] == {"こより": "可萝莉"}
+    assert resp.status_code == 201  # 旧的 terms 写法仍然接受，转为实体
+    assert [(e["canonical"], e["translations"]) for e in resp.get_json()["entries"]] == [("こより", {"*": "可萝莉"})]
+    resp = client.post("/api/glossaries", json={"name": "新格式", "entries": [
+        {"canonical": "白上フブキ", "aliases": "フブキ、フブちゃん", "category": "person",
+         "translations": [{"lang": "zh-Hans", "text": "白上吹雪"}]}]})
+    entry = resp.get_json()["entries"][0]
+    assert entry["aliases"] == ["フブキ", "フブちゃん"] and entry["translations"] == {"zh": "白上吹雪"}
+    assert client.post("/api/glossaries", json={"name": "重复", "entries": [
+        {"canonical": "a"}, {"canonical": "a"}]}).status_code == 400
+    client.delete("/api/glossaries/新格式")
     assert client.post("/api/glossaries", json={"name": "主播"}).status_code == 409
     assert client.post("/api/glossaries", json={"name": "/"}).status_code == 400
     assert client.post("/api/glossaries", data="x").status_code == 400
