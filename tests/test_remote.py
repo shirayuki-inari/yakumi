@@ -291,6 +291,7 @@ def cfg_file(tmp_path, monkeypatch):
 
 
 def test_serve_requires_password_when_exposed(cfg_file, monkeypatch):
+    pytest.importorskip("waitress")  # 可选依赖 server；CI 会安装
     started = []
     monkeypatch.setattr("waitress.serve", lambda app, **kw: started.append(kw))
     runner = CliRunner()
@@ -305,6 +306,7 @@ def test_serve_requires_password_when_exposed(cfg_file, monkeypatch):
 
 
 def test_passwd_command(cfg_file, monkeypatch):
+    pytest.importorskip("waitress")  # 可选依赖 server；CI 会安装
     started = []
     monkeypatch.setattr("waitress.serve", lambda app, **kw: started.append(kw))
     runner = CliRunner()
