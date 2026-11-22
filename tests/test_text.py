@@ -1,5 +1,10 @@
 from yakumi.models import Segment
 from yakumi.segment.cues import split_by_ratio
+
+
+def test_split_by_ratio_keeps_an_indivisible_word_whole():
+    cue = Segment(0, 10, "abcdefghijk")
+    assert split_by_ratio(cue, 6, 4, 4) == [cue]
 from yakumi.text import char_limit, is_cjk, join_text, join_texts
 
 

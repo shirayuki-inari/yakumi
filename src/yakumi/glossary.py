@@ -32,17 +32,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import tempfile
 import threading
 import tomllib
 import unicodedata
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
-from .files import config_dir
+from .files import FileBusyError, config_dir, lock_file
 
 _BAD_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 MAX_NAME = 60
@@ -58,6 +61,10 @@ CATEGORIES = {
 
 class GlossaryError(ValueError):
     pass
+
+
+class GlossaryConflict(GlossaryError):
+    """另一个操作已修改资料，调用方需要重新加载。"""
 
 
 def glossaries_dir() -> Path:
@@ -200,6 +207,7 @@ class Glossary:
     entries: list[Entry] = field(default_factory=list)
     notes: str = ""
     legacy: bool = False  # 从旧版 [terms] 读取；保存时改写为新格式
+    revision: str | None = field(default=None, repr=False, compare=False)
 
     @property
     def id(self) -> str:
@@ -223,7 +231,7 @@ class Glossary:
         return entry
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "name": self.name, "notes": self.notes, "legacy": self.legacy,
+        return {"id": self.id, "name": self.name, "notes": self.notes, "legacy": self.legacy, "revision": self.revision,
                 "entries": [e.to_dict() for e in self.entries], "suggestions": merge_suggestions(self.entries)}
 
     @classmethod
@@ -279,13 +287,13 @@ def merge_into(g: Glossary, target_id: str, source_ids: list[str]) -> Entry:
 
 def _toml_str(value: str) -> str:
     # JSON 的字符串转义是 TOML 基本字符串的子集
-    return json.dumps(value, ensure_ascii=False)
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def dumps(g: Glossary) -> str:
     lines = [f"version = {FORMAT_VERSION}", f"name = {_toml_str(g.name)}"]
     if g.notes:
-        if "'''" in g.notes:
+        if "'''" in g.notes or re.search(r"[\x00-\x08\x0b-\x1f\x7f]", g.notes):
             lines.append(f"notes = {_toml_str(g.notes)}")
         else:
             lines.append(f"notes = '''\n{g.notes}\n'''")
@@ -312,13 +320,15 @@ def path_of(gid: str, root: Path | None = None) -> Path:
 
 def load(gid: str, root: Path | None = None) -> Glossary:
     path = path_of(gid, root)
-    if not path.is_file():
-        raise GlossaryError(f"找不到背景资料：{gid}（{path}）")
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as exc:
+        content = path.read_bytes()
+        data = tomllib.loads(content.decode("utf-8"))
+        version = int(data.get("version", 1) or 1)
+    except FileNotFoundError:
+        raise GlossaryError(f"找不到背景资料：{gid}（{path}）") from None
+    except (ValueError, TypeError) as exc:
         raise GlossaryError(f"背景资料 {path} 格式有误：{exc}") from exc
-    if int(data.get("version", 1) or 1) > FORMAT_VERSION:
+    if version > FORMAT_VERSION:
         raise GlossaryError(f"背景资料 {path} 来自更新版本的 Yakumi，请升级后再使用")
     data.setdefault("name", gid)
     try:
@@ -327,31 +337,106 @@ def load(gid: str, root: Path | None = None) -> Glossary:
         raise GlossaryError(f"背景资料 {path}：{exc}") from exc
     if g.id != gid:  # 手动改过 name 时以文件名为准
         g.name = gid
+    g.revision = hashlib.sha256(content).hexdigest()
     return g
 
 
-def save(g: Glossary, root: Path | None = None, old_id: str | None = None) -> Glossary:
-    """保存（新建或覆盖）为新格式。改名时传入原来的 ID，会删除旧文件。"""
-    root = root or glossaries_dir()
+@contextmanager
+def _write_lock(root: Path) -> Iterator[None]:
     root.mkdir(parents=True, exist_ok=True)
+    try:
+        with lock_file(root / ".lock"):
+            yield
+    except FileBusyError:
+        raise GlossaryConflict("背景资料正在保存，请稍后重试") from None
+
+
+def _contents(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _check_revision(path: Path, revision: str | None) -> bytes | None:
+    content = _contents(path)
+    actual = hashlib.sha256(content).hexdigest() if content is not None else ""
+    if revision is not None and revision != actual:
+        raise GlossaryConflict(f"背景资料“{path.stem}”已更新，请重新加载后再保存")
+    return content
+
+
+def _serialized(g: Glossary) -> bytes:
     check_unique(g.entries)
+    try:
+        text = dumps(g)
+        Glossary.from_dict(tomllib.loads(text))
+        return text.encode("utf-8")
+    except ValueError as exc:
+        raise GlossaryError(f"背景资料“{g.name}”无法保存：{exc}") from exc
+
+
+def _write_file(path: Path, content: bytes) -> None:
+    stream = tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False)
+    tmp = Path(stream.name)
+    try:
+        with stream:
+            stream.write(content)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def save(g: Glossary, root: Path | None = None, old_id: str | None = None, *,
+         update_references: Callable[[], None] | None = None) -> Glossary:
+    """先提交新资料，引用更新成功后才删除改名前的文件。"""
+    root = root or glossaries_dir()
+    content = _serialized(g)
     path = path_of(g.id, root)
-    if old_id and old_id != g.id:
-        if path.exists():
-            raise GlossaryError(f"已经有名为“{g.name}”的背景资料")
-        path_of(old_id, root).unlink(missing_ok=True)
-    tmp = path.with_suffix(".toml.tmp")
-    tmp.write_text(dumps(g), encoding="utf-8")
-    os.replace(tmp, path)
-    g.legacy = False
+    previous = path_of(old_id, root) if old_id else path
+    with _write_lock(root):
+        _check_revision(previous, g.revision)
+        if previous != path and path.exists():
+            raise GlossaryConflict(f"已经有名为“{g.name}”的背景资料")
+        _write_file(path, content)
+        if update_references is not None:
+            update_references()
+        if previous != path:
+            previous.unlink(missing_ok=True)
+    g.legacy, g.revision = False, hashlib.sha256(content).hexdigest()
     return g
 
 
-def delete(gid: str, root: Path | None = None) -> None:
+def save_many(glossaries: Iterable[Glossary], commit: Callable[[], None] | None = None) -> None:
+    """在同一把锁内验证整批版本、写入资料和提交关联数据。"""
+    root = glossaries_dir()
+    prepared = {path_of(g.id, root): (g, _serialized(g)) for g in glossaries}
+    with _write_lock(root):
+        originals = {path: _check_revision(path, g.revision) for path, (g, _) in prepared.items()}
+        written = []
+        try:
+            for path, (_, content) in prepared.items():
+                _write_file(path, content)
+                written.append(path)
+            if commit is not None:
+                commit()
+        except BaseException:
+            for path in reversed(written):
+                original = originals[path]
+                if original is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    _write_file(path, original)
+            raise
+
+
+def delete(gid: str, root: Path | None = None, *, revision: str | None = None) -> None:
+    root = root or glossaries_dir()
     path = path_of(gid, root)
-    if not path.is_file():
-        raise GlossaryError(f"找不到背景资料：{gid}")
-    path.unlink()
+    with _write_lock(root):
+        if _check_revision(path, revision) is None:
+            raise GlossaryError(f"找不到背景资料：{gid}")
+        path.unlink()
 
 
 def list_all(root: Path | None = None) -> list[Glossary]:
@@ -432,15 +517,23 @@ def find_surface(surface: str, text: str, start: int = 0) -> int:
         return -1
     if not _WORDY.search(surface):
         return text.find(surface, start)
-    low, key = text.lower(), surface.lower()
-    pos = low.find(key, start)
-    while pos >= 0:
-        before = low[pos - 1] if pos > 0 else ""
-        after = low[pos + len(key)] if pos + len(key) < len(low) else ""
+    pattern = re.compile(re.escape(surface), re.IGNORECASE)
+    for match in pattern.finditer(text, start):
+        pos, end = match.span()
+        before = text[pos - 1] if pos > 0 else ""
+        after = text[end] if end < len(text) else ""
         if not (before.isascii() and before.isalnum()) and not (after.isascii() and after.isalnum()):
             return pos
-        pos = low.find(key, pos + 1)
     return -1
+
+
+@dataclass(frozen=True)
+class TermLocation:
+    sentence_id: int
+    offset: int = 0
+
+
+TermLocations = Sequence[int | TermLocation]
 
 
 class TermSet:
@@ -449,46 +542,83 @@ class TermSet:
     每批翻译只附上与这一批相关的实体：原文里出现了规范名称或别名的，以及审核记录落在这一批句子里的。
     """
 
-    def __init__(self, entries: list[Entry] | None = None, occurrences: list[dict[str, Any]] | None = None):
+    def __init__(self, entries: list[Entry] | None = None, occurrences: list[dict[str, Any]] | None = None,
+                 global_entries: list[Entry] | None = None):
         self.entries = {e.id: e for e in (entries or [])}
-        self.by_sentence: dict[int, list[tuple[str, str]]] = {}
+        self.global_entries = {e.id: e for e in ((entries or []) if global_entries is None else global_entries)}
+        self.scoped_reviews = global_entries is not None
+        self.by_sentence: dict[int, list[dict[str, Any]]] = {}
         for occ in occurrences or []:
             if occ.get("entity") in self.entries:
-                self.by_sentence.setdefault(int(occ["sentence_id"]), []).append((str(occ["surface"]), occ["entity"]))
+                self.by_sentence.setdefault(int(occ["sentence_id"]), []).append(occ)
         self.used: set[str] = set()
         self._lock = threading.Lock()
 
     def __bool__(self) -> bool:
         return bool(self.entries)
 
-    def hints(self, texts: list[str], ids: list[int] | None, target: str | None) -> list[str]:
+    def hints(self, texts: list[str], ids: TermLocations | None, target: str | None) -> list[str]:
         """这一批（texts 为各行原文，ids 为对应的句子编号）需要遵守的术语，每项一行。"""
         if not self.entries:
             return []
-        joined = "\n".join(texts)
-        found: dict[str, list[str]] = {}  # 实体 → 原文里出现的称呼
-        for e in self.entries.values():
-            names = [s for s in e.surfaces() if find_surface(s, joined) >= 0]
-            if names:
-                found[e.id] = names
-        located: dict[str, dict[str, list[int]]] = {}  # 实体 → 审核确认的片段 → 行号
-        for line_no, (text, sid) in enumerate(zip(texts, ids or []), 1):
-            for surface, eid in self.by_sentence.get(sid, []) if sid is not None else []:
-                if surface in text:  # 原文被校对改过时，这条记录不再适用
-                    located.setdefault(eid, {}).setdefault(surface, []).append(line_no)
-        lines = []
-        for eid in dict.fromkeys([*found, *located]):
-            e = self.entries[eid]
-            lines.append(self._describe(e, found.get(eid, []), target))
-            for surface, nos in located.get(eid, {}).items():
-                if norm_text(surface) in (norm_text(s) for s in e.surfaces()):
-                    continue  # 就是规范名称或别名，上面已经说明
-                where = "、".join(map(str, dict.fromkeys(nos)))
-                lines.append(f"- 第 {where} 行的「{surface}」指「{e.canonical}」，按它翻译")
+        reviewed: dict[str, dict[int, list[tuple[int, str, bool, bool]]]] = {}
+        for line_no, (text, location) in enumerate(zip(texts, ids or []), 1):
+            sid, base = (location.sentence_id, location.offset) if isinstance(location, TermLocation) else (location, 0)
+            for occ in self.by_sentence.get(sid, []):
+                surface, offset = occ["surface"], occ.get("offset")
+                column = text.find(surface) if offset is None else offset - base
+                if column >= 0 and text.startswith(surface, column):
+                    reviewed.setdefault(occ["entity"], {}).setdefault(line_no, []).append(
+                        (column, surface, bool(occ.get("rejected")), offset is not None))
+        lines: list[str] = []
+        used: set[str] = set()
+        for eid, entry in self.entries.items():
+            scoped = reviewed.get(eid, {})
+            global_entry = self.global_entries.get(eid)
+            exact_scope = scoped and (self.scoped_reviews or any(
+                rejected or exact for occurrences in scoped.values() for _, _, rejected, exact in occurrences))
+            entry_lines = []
+            if exact_scope:
+                for line_no, text in enumerate(texts, 1):
+                    sites = scoped.get(line_no, [])
+                    if global_entry is not None:
+                        for surface in global_entry.surfaces():
+                            column = find_surface(surface, text)
+                            while column >= 0:
+                                blocked = any(
+                                    (not exact and rejected and name.casefold() == surface.casefold())
+                                    or (start < column + len(surface) and column < start + len(name))
+                                    for start, name, rejected, exact in sites)
+                                if not blocked:
+                                    entry_lines.append(self._positioned(global_entry, surface, target, line_no, column))
+                                column = find_surface(surface, text, column + 1)
+                    entry_lines.extend(self._positioned(entry, surface, target, line_no, column)
+                                       for column, surface, rejected, _ in sites if not rejected)
+            else:
+                surfaces = global_entry.surfaces() if global_entry is not None else []
+                names = [s for s in surfaces if any(find_surface(s, text) >= 0 for text in texts)]
+                if names or scoped:
+                    entry_lines.append(self._describe(entry if scoped else global_entry, names, target))
+                legacy: dict[str, list[int]] = {}
+                normalized = {norm_text(s) for s in entry.surfaces()}
+                for line_no, sites in scoped.items():
+                    for _, surface, _, _ in sites:
+                        if norm_text(surface) not in normalized:
+                            legacy.setdefault(surface, []).append(line_no)
+                for surface, nos in legacy.items():
+                    where = "、".join(map(str, dict.fromkeys(nos)))
+                    entry_lines.append(f"- 第 {where} 行的「{surface}」指「{entry.canonical}」，按它翻译")
+            if entry_lines:
+                lines.extend(entry_lines)
+                used.add(eid)
         with self._lock:
-            self.used.update(found)
-            self.used.update(located)
+            self.used.update(used)
         return lines
+
+    @classmethod
+    def _positioned(cls, entry: Entry, surface: str, target: str | None, line: int, column: int) -> str:
+        rule = cls._describe(entry, [], target)[2:]
+        return f"- 第 {line} 行的「{surface}」指「{entry.canonical}」（第 {column + 1} 字起），按此译法：{rule}"
 
     @staticmethod
     def _describe(e: Entry, names: list[str], target: str | None) -> str:
@@ -502,7 +632,7 @@ class TermSet:
             return f"- {head}（保留原文，不要翻译）"
         return f"- {head} → {tr}"
 
-    def block(self, texts: list[str], ids: list[int] | None, target: str | None) -> str:
+    def block(self, texts: list[str], ids: TermLocations | None, target: str | None) -> str:
         lines = self.hints(texts, ids, target)
         return "本批涉及的术语（译名必须遵守）：\n" + "\n".join(lines) if lines else ""
 

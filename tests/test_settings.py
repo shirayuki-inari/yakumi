@@ -107,6 +107,38 @@ def test_env_locked_fields(monkeypatch):
         settings.save(None, {"translate.model": "x"})
 
 
+@pytest.mark.parametrize("section", ["asr", "translate"])
+def test_environment_key_locks_its_service_address(monkeypatch, section):
+    monkeypatch.setenv(f"YAKUMI_{section.upper()}_API_KEY", "fixture-key")
+    fid = f"{section}.base_url"
+    assert "绑定" in field(settings.describe(), fid)["locked"]
+    with pytest.raises(settings.SettingsError, match="绑定"):
+        settings.save(None, {fid: "https://different.example.invalid/v1"})
+    assert not user_config_path().exists()
+
+
+def test_injected_config_drops_keys_when_the_active_origin_changes(fake_cfg):
+    fake_cfg["translate"].update(base_url="https://first.example.invalid/v1", api_key="old")
+    fake_cfg["segment"].update(api_key="inherited-endpoint-key")
+    fake_cfg["terms"].update(base_url="https://separate.example.invalid/v1", api_key="independent-key")
+    app = create_app(cfg=fake_cfg)
+    client = app.test_client()
+    response = client.put("/api/settings", json={"changes": {"translate.api_key": "wrong-origin"}})
+    assert response.status_code == 400 and not user_config_path().exists()
+    response = client.put("/api/settings", json={"changes": {"translate.base_url": "https://second.example.invalid/v1"}})
+    assert response.status_code == 200
+    cfg = app.extensions["yakumi_runner"].cfg
+    assert cfg["translate"]["base_url"] == "https://second.example.invalid/v1"
+    assert not cfg["translate"].get("api_key")
+    assert not cfg["segment"].get("api_key")
+    assert cfg["terms"]["api_key"] == "independent-key"
+
+    response = client.put("/api/settings", json={"changes": {"translate.base_url": "https://first.example.invalid/v1",
+                                                         "translate.api_key": "new"}})
+    assert response.status_code == 200
+    assert app.extensions["yakumi_runner"].cfg["translate"]["api_key"] == "new"
+
+
 def test_complex_file_is_rewritten_with_backup():
     path = user_config_path()
     path.parent.mkdir(parents=True)

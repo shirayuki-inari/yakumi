@@ -18,10 +18,12 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from ..glossary import TermLocation
 from ..models import Segment
 from ..segment.common import ends_sentence
-from ..text import is_cjk, join_texts
+from ..text import is_cjk, join_text, join_texts
 from .base import Progress, Translator, parse_numbered
+from .punct import tidy_translation
 
 SEP = "¦"
 ALT_SEPS = ("｜", "|")
@@ -66,13 +68,28 @@ def group_by_punctuation(cues: list[Segment], max_cues: int = 6, max_gap: float 
         run += 1
 
 
+def cue_locations(cues: list[Segment]) -> list[TermLocation]:
+    """按扫描原文的拼接规则计算每条字幕在句子里的字符偏移。"""
+    ends: dict[int, tuple[int, str]] = {}
+    locations = []
+    for cue in cues:
+        end, last = ends.get(cue.group, (0, ""))
+        first = cue.text[:1]
+        start = end + len(join_text(last, first)) - len(last) - len(first)
+        locations.append(TermLocation(cue.group, start))
+        if cue.text and cue.group >= 0:
+            ends[cue.group] = (start + len(cue.text), cue.text[-1:])
+    return locations
+
+
 def split_parts(value: str, n: int) -> list[str] | None:
     value = value.strip()
     if not value:
         return None
     if n == 1:
         pieces = [p.strip() for p in value.split(SEP)]
-        return [join_texts([p for p in pieces if p])]
+        text = join_texts([p for p in pieces if p])
+        return [text] if text else None
     for sep in (SEP, *ALT_SEPS):
         parts = [p.strip() for p in value.split(sep)]
         if len(parts) == n and all(parts):
@@ -141,10 +158,10 @@ class SentenceTranslator:
         return batches
 
     def _run_batch(self, cues: list[Segment], batch: list[list[int]], context: list[tuple[str, str | None]],
-                   systems: tuple[str, str]) -> list[list[str]]:
+                   systems: tuple[str, str], locations: list[TermLocation]) -> list[list[str]]:
         grouped_sys, plain_sys = systems
         texts = [[cues[i].text.replace(SEP, " ") for i in g] for g in batch]
-        sids = [cues[g[0]].group for g in batch]  # 句子编号，用来匹配任务审核的术语记录
+        sids = [locations[g[0]] for g in batch]
         results: list[list[str] | None] = [None] * len(batch)
         pending = list(range(len(batch)))
         for attempt in range(2):
@@ -171,7 +188,7 @@ class SentenceTranslator:
                 if parts is not None:
                     self._count("split_proportional")
                 else:
-                    parts = self.tr.run_batch(plain_sys, texts[p], context, [sids[p]] * len(texts[p]))
+                    parts = self.tr.run_batch(plain_sys, texts[p], context, [locations[i] for i in batch[p]])
                     self._count("split_per_cue")
                 results[p] = parts
         return [r or [] for r in results]
@@ -181,6 +198,7 @@ class SentenceTranslator:
         self.tr.prepare(target)
         systems = (self.tr.build_prompt(target, source, GROUPED_RULES), self.tr.system_prompt(target, source))
         groups = group_cues(cues)
+        locations = cue_locations(cues)
         self._count("sentences", len(groups))
         batches = self._batches(groups)
         out: list[str] = [""] * len(cues)
@@ -199,7 +217,7 @@ class SentenceTranslator:
             history: list[tuple[str, str | None]] = []
             done = 0
             for batch in batches:
-                parts = self._run_batch(cues, batch, history[-ctx_n:] if ctx_n else [], systems)
+                parts = self._run_batch(cues, batch, history[-ctx_n:] if ctx_n else [], systems, locations)
                 store(batch, parts)
                 history.extend((source_of(g), join_texts(ps)) for g, ps in zip(batch, parts))
                 done += sum(len(g) for g in batch)
@@ -215,7 +233,7 @@ class SentenceTranslator:
             batch = batches[b]
             prev = [g for bb in batches[max(0, b - 1):b] for g in bb][-ctx_n:] if ctx_n and b else []
             context: list[tuple[str, str | None]] = [(source_of(g), None) for g in prev]
-            store(batch, self._run_batch(cues, batch, context, systems))
+            store(batch, self._run_batch(cues, batch, context, systems, locations))
             with lock:
                 done += sum(len(g) for g in batch)
                 if progress:
@@ -229,15 +247,18 @@ class SentenceTranslator:
 def translate_cues(translator: Translator, cues: list[Segment], target: str, source: str | None = None,
                    unit: str = "sentence", batch_sentences: int = 15,
                    progress: Progress | None = None) -> tuple[list[str], dict[str, Any]]:
-    """按配置的翻译单位翻译字幕条，返回每条的译文和兜底计数。"""
+    """按配置的翻译单位翻译字幕条，返回每条的译文（标点已按目标语言整理）和兜底计数。"""
     if unit == "cue":
-        return translator.translate([c.text for c in cues], target, source, progress=progress,
-                                    ids=[c.group for c in cues]), {}
-    if unit != "sentence":
+        texts = translator.translate([c.text for c in cues], target, source, progress=progress,
+                                     ids=cue_locations(cues))
+        counters: dict[str, Any] = {}
+    elif unit == "sentence":
+        st = SentenceTranslator(translator, batch_sentences)
+        texts = st.translate(cues, target, source, progress=progress)
+        counters = st.counters
+    else:
         raise ValueError(f"未知的翻译单位：{unit}（可选 sentence / cue）")
-    st = SentenceTranslator(translator, batch_sentences)
-    texts = st.translate(cues, target, source, progress=progress)
-    return texts, st.counters
+    return [tidy_translation(t, target) for t in texts], counters
 
 
 __all__ = ["SEP", "SentenceTranslator", "group_by_punctuation", "group_cues", "split_parts",

@@ -1,3 +1,5 @@
+import pytest
+
 from yakumi.models import Segment
 from yakumi.subtitle.formats import parse_srt, to_ass, to_srt, to_vtt
 
@@ -6,6 +8,12 @@ SEGS = [
     Segment(0.5, 2.25, "Hello world.", "你好，世界。"),
     Segment(3661.001, 3663.5, "Second line", ""),
 ]
+
+
+@pytest.mark.parametrize("time_line", ["00:00:02,000 --> 00:00:01,000", "00:01.000 --> 00:01.000"])
+def test_rejects_non_positive_subtitle_duration(time_line):
+    with pytest.raises(ValueError, match="结束时间必须晚于开始时间"):
+        parse_srt(f"1\n{time_line}\ntext")
 
 
 def test_srt_timestamps_and_numbering():

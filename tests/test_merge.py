@@ -7,6 +7,13 @@
 from yakumi.asr.types import AudioWindow, Word
 from yakumi.chunking.merge import dedupe_text, merge_text, merge_words, timed_lcs, to_units
 
+
+def test_midpoint_fallback_does_not_assume_midpoints_follow_start_order():
+    a = AudioWindow(0, 0, 8, 0, 5)
+    b = AudioWindow(1, 2, 10, 5, 10)
+    words, _ = merge_words([(a, [Word(0, 12, "long"), Word(1, 2, "short")]), (b, [Word(6, 7, "next")])])
+    assert [w.text for w in words] == ["short", "next"]
+
 # 切点在 120 秒，强制切分，两侧各重叠 1.5 秒
 A = AudioWindow(0, 0, 121.5, 0, 120, None, "forced")
 B = AudioWindow(1, 118.5, 240, 120, 240, "forced", None)

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 import tempfile
@@ -26,10 +27,10 @@ class WhisperCppASR:
         self.binary = str(Path(binary).expanduser())
         self.model = str(Path(model).expanduser()) if model else ""
         self.threads = threads
-        self.mode = "text"  # whisper.cpp 的 JSON 只有分段时间，按纯文本模式处理
+        self.mode = "text"  # 词级时间戳不可用，分段能力通过 capabilities 声明
 
     def capabilities(self) -> ASRCapabilities:
-        return ASRCapabilities(word_timestamps=False, max_window=INF, target_window=INF, timeout=None)
+        return ASRCapabilities(word_timestamps=False, max_window=INF, target_window=INF, segment_timestamps=True)
 
     def check(self) -> None:
         if not (shutil.which(self.binary) or Path(self.binary).is_file()):
@@ -58,11 +59,23 @@ class WhisperCppASR:
                 raise ASRError(f"whisper.cpp 输出的 JSON 无法解析：{exc}") from exc
 
         segments = []
-        for item in body.get("transcription", []):
-            offsets = item.get("offsets", {})
-            text = str(item.get("text", "")).strip()
-            if text:
-                segments.append(Segment(offsets.get("from", 0) / 1000, offsets.get("to", 0) / 1000, text))
-        lang = (body.get("result") or {}).get("language")
+        try:
+            items = body.get("transcription", [])
+            if not isinstance(items, list):
+                raise ValueError("transcription 必须是列表")
+            for item in items:
+                text = item.get("text", "").strip()
+                if not text:
+                    continue
+                offsets = item["offsets"]
+                start, end = float(offsets["from"]) / 1000, float(offsets["to"]) / 1000
+                if not 0 <= start < end or not math.isfinite(end):
+                    raise ValueError("分段时间无效")
+                segments.append(Segment(start, end, text))
+            lang = (body.get("result") or {}).get("language")
+            if lang is not None and not isinstance(lang, str):
+                raise ValueError("语言字段格式不正确")
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise ASRError(f"whisper.cpp 输出的识别结果格式不正确：{exc}") from exc
         return RawTranscript(text=" ".join(s.text for s in segments), segments=segments, language=lang,
                              elapsed=time.monotonic() - t0)

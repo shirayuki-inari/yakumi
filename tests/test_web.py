@@ -161,10 +161,17 @@ def test_upload_with_glossary_then_retranslate(app, sample_video):
     # 改名后任务里的引用同步更新
     client.put("/api/glossaries/g", json={"name": "g2", "terms": {"w0": "零"}})
     assert client.get(f"/api/jobs/{job_id}").get_json()["glossaries"] == ["g2"]
+    segments = client.get(f"/api/jobs/{job_id}/segments").get_json()
+    segments[0]["text"] = "Corrected source"
+    segments[0]["translation"] = "手动译文"
+    assert client.post(f"/api/jobs/{job_id}/render", json={"segments": segments}).status_code == 200
+    wait_idle(app, client, job_id)
     resp = client.post(f"/api/jobs/{job_id}/retranslate", json={"glossaries": [], "notes": "改过"})
     assert resp.status_code == 200
     state = wait_idle(app, client, job_id)
     assert state["status"] == "done" and state["glossaries"] == [] and state["notes"] == "改过"
+    updated = client.get(f"/api/jobs/{job_id}/segments").get_json()[0]
+    assert updated["text"] == "Corrected source" and updated["translation"] == "[zh] Corrected source"
     assert client.post(f"/api/jobs/{job_id}/retranslate", json={"glossaries": ["missing"]}).status_code == 400
 
 
@@ -251,7 +258,7 @@ def test_legacy_job_edit_is_rejected_without_migrating(fake_cfg, tmp_path, monke
     job = Job.create(workspace, tmp_path / "source.mp4", "zh")
     job.save_segments([Segment(0, 1, "old", "旧")])
     job.state.completed, job.state.status = list(STAGES[:-1]), "done"
-    job.state.pipeline_version = PIPELINE_VERSION - 1
+    job.state.pipeline_version = 3
     job.save()
     before = (tmp_path / "before.json")
     before.write_bytes(job.path("state.json").read_bytes())

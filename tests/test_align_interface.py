@@ -71,3 +71,10 @@ def test_stats_report_sections():
     assert report["cost_notes"] == ["另有 1 次未返回费用", "失败请求的费用未计入"]
     assert format_stats({"mode": "text", "windows": 2, "asr_requests": 3, "asr_failed": 1, "asr_cost": 0.1}) == (
         "识别：纯文本，2 个窗口，3 次请求，失败 1 次；费用 $0.1000（失败请求的费用未计入）")
+
+
+def test_stats_with_only_term_scanning_are_reported():
+    report = stats_report({"term_entities": 3, "terms_requests": 2, "terms_cost": 0.02, "term_failed_chunks": 1})
+    assert report["cost"] == "$0.0200"
+    [section] = report["sections"]
+    assert section["label"] == "术语扫描" and section["items"][-1] == {"text": "1 块扫描失败", "warn": True}

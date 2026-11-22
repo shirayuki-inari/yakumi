@@ -8,10 +8,12 @@ import json
 import pytest
 
 from yakumi import pipeline
+from yakumi.asr.base import ASRError
 from yakumi.asr.fake import FakeASR
 from yakumi.asr.types import AudioWindow, RawTranscript, Word
 from yakumi.chunking.merge import clean_words
 from yakumi.chunking.transcribe import WindowedTranscriber, capability_cache_path, is_truncated
+from yakumi.files import write_json
 from yakumi.models import STAGES
 from yakumi.pipeline import Job, run
 from yakumi.segment.timing import place_sentences
@@ -90,6 +92,41 @@ def test_resume_only_redoes_missing_windows(cfg, make_video, monkeypatch):
     run_until(Job.load(cfg["workspace"]["dir"], job.state.id), cfg)
     assert len(shared.calls) == total + 1
     assert words_of(job) == expected_words(20)
+
+
+def test_word_mode_keeps_window_retryable_when_only_text_is_returned(cfg, tmp_path, monkeypatch):
+    asr = FakeASR()
+    responses = iter([RawTranscript(text="recognizable"),
+                      RawTranscript(text="recognizable", words=[Word(0, 1, "recognizable")])])
+    monkeypatch.setattr(asr, "transcribe", lambda *_: next(responses))
+
+    def clip(_path, _start, _end, output):
+        output.touch()
+        return output
+
+    monkeypatch.setattr("yakumi.media.extract_clip", clip)
+    runner = WindowedTranscriber(asr, tmp_path / "audio.wav", tmp_path, [(0, 1)], 1, cfg["chunking"], None, {})
+    with pytest.raises(ASRError, match="没有词时间戳"):
+        runner.run()
+    assert not list((tmp_path / "pieces").glob("*.json"))
+    plan = runner.run()
+    piece = json.loads(runner.piece_path(plan.windows[0]).read_text())
+    assert [word["text"] for word in piece["words"]] == ["recognizable"]
+
+
+def test_migrating_v4_retries_a_cached_window_that_silently_lost_words(cfg, make_video):
+    workspace = cfg["workspace"]["dir"]
+    job = Job.create(workspace, make_video(2), None)
+    run(job, cfg)
+    [piece] = list(job.path("pieces").glob("*.json"))
+    cached = json.loads(piece.read_text())
+    write_json(piece, {**cached, "words": []})
+    job.state.pipeline_version = 4
+    job.save()
+    migrated = Job.load(workspace, job.state.id)
+    assert "transcribe" not in migrated.state.completed and not migrated.state.outputs
+    run(migrated, cfg)
+    assert words_of(migrated) == expected_words(2)
 
 
 def test_force_clears_window_cache(cfg, make_video, monkeypatch):
@@ -187,6 +224,47 @@ def test_probe_detects_and_caches_mode(tmp_path, make_video):
     assert stub2.calls == 0 and stub2.mode == "words"
 
 
+def test_empty_probe_or_legacy_text_cache_does_not_hide_word_support(tmp_path, monkeypatch):
+    def clip(_path, _start, _end, output):
+        output.touch()
+        return output
+
+    monkeypatch.setattr("yakumi.media.extract_clip", clip)
+    cache = capability_cache_path()
+    cache.parent.mkdir(parents=True)
+    write_json(cache, {AutoStub.cache_key: {"mode": "text", "checked_at": "2000-01-01"}})
+    silent = AutoStub()
+    monkeypatch.setattr(silent, "transcribe", lambda *_: RawTranscript())
+    assert WindowedTranscriber(silent, tmp_path, tmp_path, [], 3, {}, None, {}).detect_mode() == "words"
+    speaker = AutoStub()
+    assert WindowedTranscriber(speaker, tmp_path, tmp_path, [], 3, {}, None, {}).detect_mode() == "words"
+    assert speaker.calls == 1
+
+
+def test_resume_uses_language_from_completed_window(cfg, tmp_path, monkeypatch):
+    asr = FakeASR(target_window=4, max_window=8)
+    calls = []
+
+    def transcribe(_clip, language, window):
+        calls.append(language)
+        if len(calls) == 2:
+            raise ASRError("暂停")
+        return RawTranscript(text="ok", language="en", words=[Word(0, window.duration, "ok")])
+
+    def clip(_path, _start, _end, output):
+        output.touch()
+        return output
+
+    monkeypatch.setattr(asr, "transcribe", transcribe)
+    monkeypatch.setattr("yakumi.media.extract_clip", clip)
+    with pytest.raises(ASRError, match="暂停"):
+        WindowedTranscriber(asr, tmp_path, tmp_path, [(0, 9)], 9, cfg["chunking"], None, {}).run()
+    stats = {}
+    WindowedTranscriber(asr, tmp_path, tmp_path, [(0, 9)], 9, cfg["chunking"], None, stats).run()
+    assert calls[0] is None and all(language == "en" for language in calls[1:])
+    assert stats["language"] == "en"
+
+
 def test_is_truncated():
     w = AudioWindow(0, 100, 200, 100, 200)
     speech = [(100, 199.5)]
@@ -210,3 +288,8 @@ def test_place_sentences_follows_speech():
     # 只铺在窗口内的语音区间上（12～14、20～26，共 8 秒），按字数比例分配
     assert segs[0].start == 12 and segs[-1].end == 26
     assert [s.text for s in segs] == ["First one.", "Second sentence here."]
+
+
+def test_sentence_at_speech_boundary_starts_after_silence():
+    segs = place_sentences(["aa", "bb"], (0, 14), [(0, 2), (12, 14)])
+    assert [(s.start, s.end) for s in segs] == [(0, 2), (12, 14)]

@@ -114,16 +114,19 @@ def parse_srt(content: str) -> list[Segment]:
     """解析 SRT 或 VTT。一个条目里的多行文字合并为一行原文。"""
     content = content.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
     segments: list[Segment] = []
-    for block in re.split(r"\n\s*\n", content):
+    for number, block in enumerate(re.split(r"\n\s*\n", content), 1):
         lines = [ln for ln in block.strip().split("\n") if ln.strip()]
         for idx, line in enumerate(lines):
             match = _TIME_RE.search(line)
             if match:
                 g = match.groups()
+                start, end = _secs(*g[:4]), _secs(*g[4:])
+                if end <= start:
+                    raise ValueError(f"第 {number} 个字幕块的结束时间必须晚于开始时间")
                 text = " ".join(t.strip() for t in lines[idx + 1:])
                 text = re.sub(r"<[^>]+>", "", text).strip()
                 if text:
-                    segments.append(Segment(_secs(*g[:4]), _secs(*g[4:]), text))
+                    segments.append(Segment(start, end, text))
                 break
     return segments
 

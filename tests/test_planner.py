@@ -39,6 +39,15 @@ def test_short_audio_single_window():
     assert (windows[0].start, windows[0].end) == (0, 200)
 
 
+def test_single_window_respects_the_hard_limit():
+    caps = ASRCapabilities(word_timestamps=True, max_window=8, target_window=8)
+    windows, bounds = plan(9, [(0, 9)], caps, CHUNK)
+    assert bounds
+    check_cover(windows, 9, 8)
+    with pytest.raises(ValueError, match="向前推进"):
+        plan(9, [(0, 9)], caps, {**CHUNK, "tolerance": 1})
+
+
 def test_cuts_fall_in_silence_and_always_overlap():
     duration = 3600
     speech = talk(duration)
@@ -92,7 +101,7 @@ def test_text_mode_groups_short_windows():
 
 def test_unlimited_backend_not_split():
     caps = ASRCapabilities(word_timestamps=False, max_window=math.inf, target_window=math.inf)
-    windows, _ = plan(7200, talk(7200), caps, CHUNK, word_mode=True)
+    windows, _ = plan(7200, talk(7200), caps, CHUNK)
     assert len(windows) == 1
 
 

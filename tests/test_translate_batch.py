@@ -4,6 +4,12 @@ from yakumi.translate.base import Translator, parse_numbered
 from yakumi.translate.openai_compat import OpenAICompatTranslator
 
 
+def test_single_cue_fallback_respects_disabled_context():
+    tr = Scripted(["1|", "1|", "1|first", "1|second"], context_lines=0)
+    assert tr.translate(["source one", "source two"], "zh") == ["first", "second"]
+    assert "source one" not in str(tr.prompts[-1])
+
+
 class Scripted(Translator):
     """按脚本依次返回回复，并记录请求。"""
 

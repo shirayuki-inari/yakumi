@@ -25,7 +25,7 @@ import math
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 from ..asr.types import AudioWindow, Word
 from ..text import CJK_RE
@@ -133,10 +133,10 @@ def midpoint(w: Word) -> float:
 
 
 def splice(a_words: list[Word], b_words: list[Word], a_win: AudioWindow, b_win: AudioWindow,
-           tolerance: float, edge_margin: float = 0.5) -> tuple[int, int, BoundaryReport]:
+           tolerance: float, edge_margin: float = 0.5) -> tuple[Sequence[int], Sequence[int], BoundaryReport]:
     """在切点处拼接相邻窗口（两个窗口在切点两侧有重叠）。
 
-    返回 (a_end, b_start, 报告)：A 保留 a_words[:a_end] 中归它的部分，B 从 b_words[b_start:] 开始。
+    返回两侧要保留的词下标和边界报告。中点归属可能保留非连续的词。
     """
     cut = a_win.core_end
     kind = a_win.right or "forced"
@@ -156,11 +156,11 @@ def splice(a_words: list[Word], b_words: list[Word], a_win: AudioWindow, b_win: 
         i, j = max(aligned, key=lambda p: (p[0] + 1 + nb - p[1] - 1, -abs(a_units[p[0]].time - cut)))
         a_end = a_idx[a_units[i].word] + 1
         b_start = b_idx[b_units[j].word] + 1
-        return a_end, b_start, BoundaryReport(cut, kind, "lcs", len(pairs))
+        return range(a_end), range(b_start, len(b_words)), BoundaryReport(cut, kind, "lcs", len(pairs))
 
     # 没有可用的匹配：按中点归属。重叠区里有（片段边缘以外的）词却对不上才算高风险，交给边界修复
-    a_end = sum(1 for w in a_words if midpoint(w) < cut)
-    b_start = sum(1 for w in b_words if midpoint(w) < cut)
+    keep_a = [i for i, w in enumerate(a_words) if midpoint(w) < cut]
+    keep_b = [i for i, w in enumerate(b_words) if midpoint(w) >= cut]
     # 只有在两个片段都可靠的区间内（B 开头之后、A 结尾之前各留 edge_margin）对不上，才算风险
     lo_ok, hi_ok = b_win.start + edge_margin, a_win.end - edge_margin
     inner = [w for w in [a_words[i] for i in a_idx] + [b_words[i] for i in b_idx]
@@ -169,7 +169,7 @@ def splice(a_words: list[Word], b_words: list[Word], a_win: AudioWindow, b_win: 
         strategy, risky = "midpoint", True
     else:
         strategy, risky = ("edge" if a_units or b_units else "empty"), False
-    return a_end, b_start, BoundaryReport(cut, kind, strategy, len(pairs), risky=risky)
+    return keep_a, keep_b, BoundaryReport(cut, kind, strategy, len(pairs), risky=risky)
 
 
 def merge_words(pieces: list[tuple[AudioWindow, list[Word]]], tolerance: float = 0.5,
@@ -177,22 +177,16 @@ def merge_words(pieces: list[tuple[AudioWindow, list[Word]]], tolerance: float =
     """pieces 中的词为全局时间。返回合并后的词和每个边界的报告。"""
     pieces = sorted(((w, clean_words(ws)) for w, ws in pieces), key=lambda p: p[0].core_start)
     n = len(pieces)
-    # 每个窗口保留 words[start:end]
-    starts = [0] * n
-    ends = [len(ws) for _, ws in pieces]
+    kept = [set(range(len(ws))) for _, ws in pieces]
     reports: list[BoundaryReport] = []
     for k in range(n - 1):
         (a_win, a_words), (b_win, b_words) = pieces[k], pieces[k + 1]
-        ends[k], starts[k + 1], report = splice(a_words, b_words, a_win, b_win, tolerance, edge_margin)
+        left, right, report = splice(a_words, b_words, a_win, b_win, tolerance, edge_margin)
+        kept[k].intersection_update(left)
+        kept[k + 1].intersection_update(right)
         reports.append(report)
 
-    merged: list[Word] = []
-    for k, (_, words) in enumerate(pieces):
-        kept = words[starts[k]:ends[k]]
-        # 极端情况下（窗口很短、两侧拼接点交叉）避免时间倒退
-        if merged:
-            kept = [w for w in kept if midpoint(w) >= midpoint(merged[-1]) - tolerance]
-        merged.extend(kept)
+    merged = [word for (_, words), indices in zip(pieces, kept) for i, word in enumerate(words) if i in indices]
     return clean_words(merged), reports
 
 

@@ -16,9 +16,9 @@ import click
 from . import __version__, media
 from . import glossary as glossary_store
 from .config import ConfigError, load_config
-from .files import read_json
-from .models import STAGES, JobState, segments_from_list
-from .pipeline import STAGE_LABELS, Job, PipelineError, job_terms, record_translation_usage, run, translation_config
+from .models import STAGES, JobState
+from .pipeline import (STAGE_LABELS, Job, PipelineError, job_terms, record_translation_usage, run, term_scan_context,
+                       term_scan_context_changed, translation_config)
 from .segment import INHERITED, segment_llm_config
 from .terms import MODES as TERM_MODES, sentences_from_cues, terms_llm_config
 from .terms import review as term_review
@@ -121,7 +121,9 @@ def _stage_inputs(cfg: dict[str, Any], state: JobState, job: Job | None = None) 
                     if key not in INHERITED and key not in RUNTIME_ONLY["terms"] and key != "mode"}
             llm = terms_llm_config(cfg)
             scan.update({key: llm.get(key) for key in INHERITED if key not in RUNTIME_ONLY["terms"]})
-            inputs["term_scan"] = [state.term_mode, scan]
+            ctx = term_scan_context(cfg, state, job)
+            inputs["term_scan"] = [state.term_mode, scan, ctx.target, ctx.title, ctx.notes,
+                                   [entry.to_dict() for entry in ctx.known]]
     return {stage: _digest(value) for stage, value in inputs.items()}
 
 
@@ -163,6 +165,8 @@ def _update_job_inputs(job: Job, cfg: dict[str, Any], bilingual: bool, burn: boo
     current = _stage_inputs(cfg, st, job)
     previous, st.stage_inputs = st.stage_inputs or {}, current
     changed = next((stage for stage in STAGES if previous.get(stage) != current.get(stage)), None)
+    if (changed is None or STAGES.index(changed) > STAGES.index("term_scan")) and term_scan_context_changed(job, cfg):
+        changed = "term_scan"
     if previous and changed:
         job.invalidate_from(changed)
         click.echo(f"任务输入有变化，将从「{STAGE_LABELS[changed]}」重新处理", err=True)
@@ -467,12 +471,12 @@ def context_show(name):
 
 def _get_or_new(name: str) -> glossary_store.Glossary:
     try:
-        return glossary_store.load(glossary_store.glossary_id(name))
-    except glossary_store.GlossaryError:
-        try:
-            return glossary_store.Glossary(name=glossary_store.glossary_id(name))
-        except glossary_store.GlossaryError as exc:
-            raise click.ClickException(str(exc)) from exc
+        gid = glossary_store.glossary_id(name)
+        if not glossary_store.path_of(gid).exists():
+            return glossary_store.Glossary(name=gid, revision="")
+        return glossary_store.load(gid)
+    except glossary_store.GlossaryError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @context.command("notes")
@@ -626,7 +630,7 @@ def _nullcontext() -> Iterator[None]:
 
 
 def _context_lines(job: Job, e: term_review.ReviewEntity, limit: int = 3) -> list[str]:
-    texts = {s.id: s.text for s in sentences_from_cues(segments_from_list(read_json(job.path("aligned.json"))))}
+    texts = {s.id: s.text for s in sentences_from_cues(job.source_segments())}
     lines = []
     for o in e.occurrences[:limit]:
         text = texts.get(o.sentence_id, "")

@@ -3,6 +3,7 @@ import pytest
 
 from yakumi.asr.base import ASRError, ASRTimeout, ASRTooLarge
 from yakumi.asr.openai_compat import OpenAICompatASR
+from yakumi.asr.types import AudioWindow
 from yakumi.config import load_config
 from yakumi.llm import chat_from_config
 from yakumi.segment import segment_llm_config
@@ -28,6 +29,15 @@ def audio(tmp_path):
 def make(handler, **kw):
     return OpenAICompatASR("http://x/v1", "m", "k", client=httpx.Client(transport=httpx.MockTransport(handler)),
                            retries=0, **kw)
+
+
+@pytest.mark.parametrize("body", [[], {"words": [{"word": "ok", "end": 1}]},
+                              {"words": [{"word": "ok", "start": 0, "end": "inf"}]},
+                              {"words": [{"word": "ok", "start": 0, "end": 9}]}, {"usage": 4}])
+def test_invalid_asr_response_raises_domain_error(audio, body):
+    asr = make(lambda _: httpx.Response(200, json=body))
+    with pytest.raises(ASRError, match="语音识别响应"):
+        asr.transcribe(audio, window=AudioWindow(0, 0, 3, 0, 3))
 
 
 def test_verbose_json_words_and_cost(audio):

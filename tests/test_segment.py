@@ -4,11 +4,31 @@ from yakumi.asr.types import Word
 from yakumi.llm import LLMError
 from yakumi.segment import create_segmenter, segment_words
 from yakumi.segment.common import cap_spans, check_spans, join_texts, tokenize
-from yakumi.segment.cues import build_cues
+from yakumi.models import Segment
+from yakumi.segment.cues import build_cues, fix_timing
 from yakumi.segment.llm import FakeChat, LLMSegmenter, map_breaks, plan_chunks
 from yakumi.segment.rules import rule_spans
 
 SUB = {"max_chars": 42, "max_chars_cjk": 20, "max_duration": 6.0, "min_duration": 0.8}
+
+
+def test_same_start_cues_have_positive_disjoint_millisecond_times():
+    cues = fix_timing([Segment(1, 1, "first"), Segment(1, 1.8, "second"), Segment(1.0014, 2, "third")], 0.8)
+    for cue, following in zip(cues, cues[1:]):
+        assert cue.start < cue.end <= following.start
+    assert cues[-1].start < cues[-1].end
+
+
+def test_squeezed_cue_borrows_the_gap_before_it():
+    # 识别把这一条和下一条的开始时间给成了同一时刻，前面有空档：提前显示，而不是只剩 1 毫秒
+    cues = fix_timing([Segment(1101.656, 1101.756, "丁寧"), Segment(1105.156, 1105.256, "に。"),
+                       Segment(1105.156, 1107.856, "気持ちよく感じてくれてよかった。")], 0.8)
+    assert [(c.start, c.end) for c in cues] == [(1101.656, 1102.456), (1104.357, 1105.157), (1105.157, 1107.856)]
+
+
+def test_squeezed_cue_delays_next_when_no_gap_before():
+    cues = fix_timing([Segment(0.0, 1.0, "a"), Segment(1.0, 1.0, "b"), Segment(1.0, 3.0, "c")], 0.8)
+    assert [(c.start, c.end) for c in cues] == [(0.0, 1.0), (1.0, 1.8), (1.8, 3.0)]
 
 
 def words_from(spec):

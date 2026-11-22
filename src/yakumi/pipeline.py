@@ -24,11 +24,14 @@ translate → write → burn。
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import secrets
 import shutil
 import time
 from contextlib import contextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -39,7 +42,7 @@ from .asr import create_asr
 from .asr.types import AudioWindow, Word
 from .chunking.merge import TextBlock, merge_text, merge_words
 from .chunking.repair import Repairer
-from .chunking.transcribe import WindowedTranscriber, WindowPlan, load_pieces
+from .chunking.transcribe import WindowedTranscriber, WindowPlan, load_pieces, word_cache_needs_retry
 from .chunking.vad import create_vad
 from .files import FileBusyError, lock_file, read_json, write_json
 from .llm import record_usage
@@ -50,6 +53,7 @@ from .terms import create_scanner, sentences_from_cues
 from .terms import review as term_review
 from .terms.resolver import resolve as resolve_terms
 from .terms.scanner import ScanContext
+from .terms.validator import SentenceText
 from .translate import create_translator
 from .translate.grouped import group_by_punctuation, translate_cues
 
@@ -63,7 +67,8 @@ WEIGHTS = {"download": 10, "extract": 3, "vad": 4, "transcribe": 34, "merge": 1,
            "term_scan": 3, "term_review": 0, "translate": 34, "write": 2, "burn": 14}
 
 # 旧版本任务的迁移：版本号 → 从哪个阶段开始重跑（之前的产物格式没变，保留）。不在表里的版本从头重跑
-MIGRATIONS = {3: "segment"}  # 3 → 4：断句改为 LLM 断句 + 句内拆分，识别、合并、复核的结果不变
+# 第 5 版新增带分段时间戳的计划，原有产物仍可直接使用。
+MIGRATIONS = {3: "segment", 4: None}
 
 STAGE_LABELS = {
     "download": "下载视频",
@@ -97,7 +102,7 @@ class AwaitingReview(Exception):
 
 
 def new_job_id() -> str:
-    return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
+    return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(8)
 
 
 class Job:
@@ -119,20 +124,41 @@ class Job:
         """
         root = Path(workspace) / "jobs"
         now = time.time()
+        root.mkdir(parents=True, exist_ok=True)
+        for _ in range(16):
+            candidate = new_job_id() if job_id is None else job_id
+            if not JOB_ID_RE.fullmatch(candidate):
+                raise PipelineError(f"任务 ID 不合法：{candidate}")
+            try:
+                (root / candidate).mkdir()
+            except FileExistsError:
+                if job_id is not None:
+                    raise PipelineError(f"任务已存在：{job_id}") from None
+            else:
+                break
+        else:
+            raise PipelineError("无法分配任务目录，请重试")
         state = JobState(
-            id=job_id or new_job_id(), video=str(Path(video).resolve()) if video else "", target_lang=target_lang or "",
+            id=candidate, video=str(Path(video).resolve()) if video else "", target_lang=target_lang or "",
             source_lang=source_lang or None, bilingual=bilingual, burn=burn, format=fmt,
             created_at=now, updated_at=now, pipeline_version=PIPELINE_VERSION,
             glossaries=list(glossaries or []), notes=notes.strip(), stage_inputs=stage_inputs,
             source_url=source_url, term_mode=term_mode if target_lang else "off",
         )
         job = cls(root, state)
-        job.dir.mkdir(parents=True, exist_ok=True)
-        if move_video and video:
-            dest = job.dir / ("input" + Path(video).suffix.lower())
-            shutil.move(str(video), dest)
-            job.state.video = str(dest.resolve())
-        job.save()
+        moved: Path | None = None
+        try:
+            if move_video and video:
+                dest = job.dir / ("input" + Path(video).suffix.lower())
+                shutil.move(str(video), dest)
+                moved = dest
+                job.state.video = str(dest.resolve())
+            job.save()
+        except OSError:
+            if moved is not None and video is not None:
+                shutil.move(str(moved), video)
+            shutil.rmtree(job.dir, ignore_errors=True)
+            raise
         return job
 
     @classmethod
@@ -173,10 +199,14 @@ class Job:
             st.outputs = {}
             for name in ("aligned.json", "translated.json", "sentences.json"):
                 self.path(name).unlink(missing_ok=True)
-        else:
+        elif st.pipeline_version not in MIGRATIONS:
             # 没有迁移规则的旧任务：中间产物格式不同，从头重跑
             st.completed, st.outputs, st.stats = [], {}, {}
             self.clear_transcription()
+        elif "transcribe" in st.completed and word_cache_needs_retry(self.dir):
+            # 旧版可能已导出了缺词结果。保留正常分窗，让缺损窗口重新识别。
+            st.completed.remove("transcribe")
+            self.invalidate_from("merge")
         st.pipeline_version = PIPELINE_VERSION
         self.save()
 
@@ -205,7 +235,7 @@ class Job:
 
     # ---- 分段读写（Web 编辑使用）--------------------------------------
     def segments(self) -> list[Segment]:
-        if self.state.pipeline_version != PIPELINE_VERSION:
+        if self.state.pipeline_version not in (4, PIPELINE_VERSION):
             return []  # 待迁移的任务会删除或重建这些文件，不提供给校对
         for name in ("translated.json", "aligned.json"):
             if self.path(name).is_file():
@@ -217,10 +247,19 @@ class Job:
         write_json(self.path(name), segments_to_list(segments))
         self.invalidate_from("write")
 
+    def source_segments(self) -> list[Segment]:
+        """当前原文。已翻译任务的校对保存在 translated.json 中。"""
+        return [Segment(c.start, c.end, c.text, group=c.group) for c in self.segments()]
+
+    def replace_aligned(self, segments: list[Segment]) -> None:
+        """重建原始字幕条时，旧译文和校对不再对应当前输入。"""
+        self.path("translated.json").unlink(missing_ok=True)
+        write_json(self.path("aligned.json"), segments_to_list(segments))
+
     def import_subtitles(self, segments: list[Segment]) -> None:
         """导入已有字幕：没有词级时间和句子信息，按句末标点把连续的字幕条并成句子，跳过识别和断句。"""
         group_by_punctuation(segments)
-        write_json(self.path("aligned.json"), segments_to_list(segments))
+        self.replace_aligned(segments)
         self.state.source_type = "subtitles"
         self.state.completed = STAGES[:STAGES.index("term_scan")]
         self.state.stats = {"imported_cues": len(segments)}
@@ -242,6 +281,7 @@ class Job:
         """删除分窗识别的缓存（窗口计划与各窗口结果）。"""
         self.path("windows.json").unlink(missing_ok=True)
         shutil.rmtree(self.path("pieces"), ignore_errors=True)
+        self.state.stats.pop("language", None)
 
     def invalidate_from(self, stage: str) -> None:
         idx = STAGES.index(stage)
@@ -303,6 +343,10 @@ def run(job: Job, cfg: dict[str, Any], progress: ProgressFn | None = None, force
             job.invalidate_from(first_stage(state))
         elif from_stage:
             job.invalidate_from(from_stage)
+        if "merge" in stages and "merge" not in state.completed and "transcribe" in state.completed:
+            if word_cache_needs_retry(job.dir):
+                state.completed.remove("transcribe")
+                job.save()
         # audio.wav 在任务完成后会被删除；还有需要它的阶段没跑完时，重新抽取
         pending = [s for s in stages if s not in state.completed]
         if any(s in AUDIO_STAGES for s in pending) and not job.path("audio.wav").is_file():
@@ -314,6 +358,7 @@ def run(job: Job, cfg: dict[str, Any], progress: ProgressFn | None = None, force
             report(stage, 0.0)
             STAGE_FUNCS[stage](job, cfg, lambda f, m="", s=stage: report(s, f, m))
             state.completed.append(stage)
+            job.save()
             done_weight += WEIGHTS[stage]
     except AwaitingReview as exc:
         state.status, state.stage, state.message = "awaiting_review", "term_review", str(exc)
@@ -401,6 +446,17 @@ def _stage_merge(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
         if not words:
             raise PipelineError("没有识别到语音")
         data: dict[str, Any] = {"mode": "words", "words": [w.to_dict() for w in words]}
+    elif plan.mode == "segments":
+        blocks = []
+        for window, piece in pairs:
+            for segment in segments_from_list(piece["segments"]):
+                # 如果后端有硬上限，重叠区的分段按中点归属。
+                if window.core_start <= (segment.start + segment.end) / 2 < window.core_end:
+                    blocks.append(TextBlock(segment.start, segment.end, segment.text))
+        if not blocks:
+            raise PipelineError("没有识别到语音")
+        reports = []
+        data = {"mode": "segments", "blocks": [b.to_dict() for b in blocks]}
     else:
         blocks, reports = merge_text([(w, p.get("text", "")) for w, p in pairs])
         if not blocks:
@@ -420,6 +476,7 @@ def _stage_repair(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
         return
     words = [Word.from_dict(w) for w in data["words"]]
     rcfg = cfg.get("repair", {})
+    language = job.state.source_lang or job.state.stats.get("language")
     log: list[dict[str, Any]] = []
     if rcfg.get("enabled", True):
         duration, speech = _load_vad(job)
@@ -427,7 +484,7 @@ def _stage_repair(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
         truncated = [AudioWindow.from_dict(p["window"]) for p in load_pieces(job.dir, plan) if p.get("truncated")]
         repairer = Repairer(
             create_asr(cfg["asr"]), job.path("audio.wav"), job.dir, speech, duration, rcfg,
-            job.state.source_lang, job.state.stats,
+            language, job.state.stats,
             clip_suffix=media.upload_suffix(cfg["asr"].get("upload_format", "flac")),
             tolerance=float(cfg["chunking"].get("match_tolerance", 0.5)), report=report,
         )
@@ -437,7 +494,7 @@ def _stage_repair(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
     aligner = create_aligner(cfg.get("alignment", {}))
     if aligner.name != "none":
         report(0.9, "校准时间戳")
-        aligned = aligner.align(job.path("audio.wav"), words, job.state.source_lang)
+        aligned = aligner.align(job.path("audio.wav"), words, language)
         check_alignment(words, aligned)
         words = aligned
         job.state.stats["aligner"] = aligner.name
@@ -459,11 +516,11 @@ def _stage_segment(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
         words = [Word.from_dict(w) for w in data["words"]]
         sentences, cues = segment_words(words, segmenter, sub, float(scfg.get("cue_gap", 1.2)), progress)
     else:
-        _, speech = _load_vad(job)
+        speech = [] if data["mode"] == "segments" else _load_vad(job)[1]
         blocks = [(b.text, (b.core_start, b.core_end)) for b in (TextBlock.from_dict(x) for x in data["blocks"])]
         sentences, cues = segment_blocks(blocks, speech, segmenter, sub, progress)
     write_json(job.path("sentences.json"), [s.to_dict() for s in sentences])
-    write_json(job.path("aligned.json"), segments_to_list(cues))
+    job.replace_aligned(cues)
     stats = job.state.stats
     stats["segment_mode"] = segmenter.name
     stats["sentences"], stats["cues"] = len(sentences), len(cues)
@@ -473,39 +530,56 @@ def _stage_segment(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
         record_usage(stats, "segment", segmenter.usage)
 
 
-def _job_title(job: Job) -> str:
-    meta = job.path("meta.json")
-    if meta.is_file():
-        name = str(read_json(meta).get("name") or "")
-        if name:
-            return Path(name).stem
-    return Path(job.state.video).stem if job.state.video else ""
+def term_scan_context(cfg: dict[str, Any], state: JobState, job: Job | None = None) -> ScanContext:
+    name = state.video
+    if job is not None and (meta := job.path("meta.json")).is_file():
+        name = str(read_json(meta).get("name") or name)
+    try:
+        library, notes = glossary_store.resolve(cfg["translate"].get("glossary"), state.glossaries, state.notes)
+    except glossary_store.GlossaryError as exc:
+        raise PipelineError(str(exc)) from exc
+    base_notes = str(cfg["translate"].get("notes", "") or "").strip()
+    return ScanContext(target=state.target_lang, title=Path(name).stem if name else "",
+                       notes="\n\n".join(n for n in (base_notes, notes) if n), known=library)
+
+
+def _term_scan_digest(ctx: ScanContext, sentences: list[SentenceText]) -> str:
+    data = [asdict(ctx), [[s.id, s.text] for s in sentences]]
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+
+def term_scan_context_changed(job: Job, cfg: dict[str, Any]) -> bool:
+    if job.state.term_mode not in ("review", "auto") or "term_scan" not in job.state.completed:
+        return False
+    candidate_path = job.path(term_review.CANDIDATES_FILE)
+    if not candidate_path.is_file():
+        return True
+    ctx = term_scan_context(cfg, job.state, job)
+    return read_json(candidate_path).get("context") != _term_scan_digest(ctx, sentences_from_cues(job.source_segments()))
 
 
 def _stage_term_scan(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
     """扫描 → 校验 → 关联，写出候选和审核数据。重新扫描时保留已有的审核决定。"""
-    sentences = sentences_from_cues(segments_from_list(read_json(job.path("aligned.json"))))
-    try:
-        library, notes = glossary_store.resolve(cfg["translate"].get("glossary"), job.state.glossaries, job.state.notes)
-    except glossary_store.GlossaryError as exc:
-        raise PipelineError(str(exc)) from exc
-    base_notes = str(cfg["translate"].get("notes", "") or "").strip()
-    ctx = ScanContext(target=job.state.target_lang, title=_job_title(job),
-                      notes="\n\n".join(n for n in (base_notes, notes) if n), known=library)
+    sentences = sentences_from_cues(job.source_segments())
+    ctx = term_scan_context(cfg, job.state, job)
     scanner = create_scanner(cfg)
-    result = scanner.scan(sentences, ctx, progress=lambda d, n: report(d / max(1, n), f"术语扫描 {d}/{n}"))
+    try:
+        result = scanner.scan(sentences, ctx, progress=lambda d, n: report(d / max(1, n), f"术语扫描 {d}/{n}"))
+    finally:
+        record_usage(job.state.stats, "terms", scanner.usage)
     write_json(job.path(term_review.CANDIDATES_FILE), {
+        "context": _term_scan_digest(ctx, sentences),
         "chunks": result.chunks, "failed_chunks": result.failed_chunks, "repairs": result.repairs,
         "candidates": [c.to_dict() for c in result.candidates], "invalid": result.invalid,
     })
     review = term_review.Review(target=job.state.target_lang,
-                                entities=resolve_terms(result.candidates, sentences, library, job.state.target_lang))
+                                entities=resolve_terms(result.candidates, sentences, ctx.known, job.state.target_lang))
     term_review.carry_over(review, term_review.load_review(job.dir))
     term_review.save_review(job.dir, review)
     stats = job.state.stats
     stats["term_candidates"], stats["term_entities"] = len(result.candidates), len(review.entities)
-    stats["term_invalid"] = len(result.invalid)
-    record_usage(stats, "terms", scanner.usage)
+    stats["term_failed_chunks"] = result.failed_chunks
+    stats["term_invalid"] = len(result.invalid) - result.failed_chunks
 
 
 def _stage_term_review(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
@@ -531,7 +605,9 @@ def job_terms(job: Job) -> tuple[list[glossary_store.Entry], list[dict[str, Any]
 
 
 def _stage_translate(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
-    segments = segments_from_list(read_json(job.path("aligned.json")))
+    segments = job.source_segments()
+    if not segments:
+        raise PipelineError("没有可翻译的原文字幕")
     tcfg = translation_config(cfg["translate"], job.state.glossaries, job.state.notes, job_terms(job))
     if job.state.source_type == "subtitles":
         tcfg["source_kind"] = "subtitle"  # 原文是已有的字幕，而不是语音识别结果
@@ -567,13 +643,16 @@ def translation_config(tcfg: dict[str, Any], glossaries: list[str], notes: str,
     except glossary_store.GlossaryError as exc:
         raise PipelineError(str(exc)) from exc
     job_entries, occurrences = job_terms or ([], [])
+    scoped = {}
     if job_entries:
         # 审核时改成了已有实体的名称、或两个新实体同名时会合并，出现记录要指向合并后的实体
         id_map: dict[str, str] = {}
-        entries = glossary_store.merge_entries([entries, job_entries], id_map)
+        merged = glossary_store.merge_entries([entries, job_entries], id_map)
+        scoped["term_global_entries"] = [{**e.to_dict(), "id": id_map.get(e.id, e.id)} for e in entries]
+        entries = merged
         occurrences = [{**o, "entity": id_map.get(o["entity"], o["entity"])} for o in occurrences]
     base_notes = str(tcfg.get("notes", "") or "").strip()
-    return {**tcfg, "glossary": [e.to_dict() for e in entries], "term_occurrences": occurrences,
+    return {**tcfg, **scoped, "glossary": [e.to_dict() for e in entries], "term_occurrences": occurrences,
             "notes": "\n\n".join(n for n in (base_notes, extra) if n)}
 
 

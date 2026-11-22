@@ -56,7 +56,7 @@ def resolve(candidates: list[Candidate], sentences: list[SentenceText], library:
                 while pos >= 0:
                     spans.append((s.id, pos, pos + len(surface), key, s.text[pos:pos + len(surface)]))
                     pos = find_surface(surface, s.text, pos + 1)
-    kept: dict[str, list[tuple[int, str]]] = {}
+    kept: dict[str, set[tuple[int, int, str]]] = {}
     by_sentence: dict[int, list[tuple[int, int, int, str, str]]] = {}
     for span in spans:
         by_sentence.setdefault(span[0], []).append(span)
@@ -64,8 +64,8 @@ def resolve(candidates: list[Candidate], sentences: list[SentenceText], library:
         for sp in items:
             covered = any(o is not sp and o[1] <= sp[1] and sp[2] <= o[2] and (o[2] - o[1]) > (sp[2] - sp[1])
                           for o in items)
-            if not covered and (sid, sp[4]) not in kept.get(sp[3], []):
-                kept.setdefault(sp[3], []).append((sid, sp[4]))
+            if not covered:
+                kept.setdefault(sp[3], set()).add((sid, sp[1], sp[4]))
 
     times = {s.id: s.start for s in sentences}
     entities = []
@@ -74,8 +74,8 @@ def resolve(candidates: list[Candidate], sentences: list[SentenceText], library:
         entry: Entry | None = g["entry"]
         model_sites = {(c.sentence_id, c.surface) for c in cands}
         occurrences = [ReviewOccurrence(sid, surface, times.get(sid, 0.0),
-                                        "model" if (sid, surface) in model_sites else "search")
-                       for sid, surface in sorted(kept.get(key, []), key=lambda x: (times.get(x[0], 0.0), x[0]))]
+                                        "model" if (sid, surface) in model_sites else "search", offset=pos)
+                       for sid, pos, surface in sorted(kept.get(key, ()), key=lambda x: (times.get(x[0], 0.0), *x))]
         if not occurrences:
             continue
         lib_tr = entry.translation_for(target) if entry else None
@@ -93,6 +93,7 @@ def resolve(candidates: list[Candidate], sentences: list[SentenceText], library:
             surfaces=list(dict.fromkeys(c.surface for c in cands)),
             evidence=list(dict.fromkeys(c.evidence for c in cands if c.evidence))[:5],
             occurrences=occurrences,
+            translation_from_library=lib_tr is not None,
         ))
     entities.sort(key=lambda e: (e.occurrences[0].start, e.key))
     return entities

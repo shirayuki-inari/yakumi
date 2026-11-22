@@ -17,15 +17,20 @@ def _item(text: str, warn: bool = False) -> Item:
 def stats_report(stats: dict[str, Any]) -> dict[str, Any] | None:
     """分项摘要：`sections` 每项是 {label, items: [{text, warn}]}（warn 标出失败的请求），
     `cost` 是总费用，`cost_notes` 是费用的附注。"""
-    if not any(stats.get(k) for k in ("asr_requests", "translate_requests", "segment_mode")):
+    if "term_entities" not in stats and not any(
+            stats.get(k) for k in ("asr_requests", "translate_requests", "segment_mode", "terms_requests")):
         return None
     sections = []
     if stats.get("asr_requests"):
         sections.append({"label": "识别", "items": _asr_items(stats)})
     if stats.get("segment_mode"):
         sections.append({"label": "断句", "items": _segment_items(stats)})
-    if "term_entities" in stats:
-        items = [_item(f"{stats['term_entities']} 个术语")]
+    if "term_entities" in stats or stats.get("terms_requests"):
+        items = [_item(f"{stats.get('term_entities', 0)} 个术语")]
+        if stats.get("terms_requests"):
+            items.append(_item(f"{stats['terms_requests']:g} 次请求"))
+        if stats.get("term_failed_chunks"):
+            items.append(_item(f"{stats['term_failed_chunks']} 块扫描失败", warn=True))
         if stats.get("term_invalid"):
             items.append(_item(f"{stats['term_invalid']} 条结果在原文里找不到"))
         sections.append({"label": "术语扫描", "items": items})
@@ -79,7 +84,8 @@ def _translate_items(stats: dict[str, Any]) -> list[Item]:
 
 
 def _asr_items(stats: dict[str, Any]) -> list[Item]:
-    mode = {"words": "词级时间戳", "text": "纯文本"}.get(stats.get("mode", ""), stats.get("mode", ""))
+    mode = {"words": "词级时间戳", "segments": "分段时间戳", "text": "纯文本"}.get(
+        stats.get("mode", ""), stats.get("mode", ""))
     items = [_item(mode), _item(f"{stats.get('windows', 1)} 个窗口"), _item(f"{stats['asr_requests']} 次请求")]
     if stats.get("asr_failed"):
         items.append(_item(f"失败 {stats['asr_failed']} 次", warn=True))

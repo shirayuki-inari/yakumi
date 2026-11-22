@@ -24,6 +24,7 @@
   let filter = "pending";
   let loadedAt = null;
   let submitting = false;
+  let loadRequest = 0;
 
   const busy = () => job.busy || job.status === "running" || job.status === "pending";
   const entities = () => data?.review?.entities || [];
@@ -65,8 +66,8 @@
       span.textContent = `（第 ${occ.sentence_id} 句的原文已经改动）`;
       return span;
     }
-    const pos = s.text.indexOf(occ.surface);
-    if (pos < 0) {
+    const pos = occ.offset == null ? s.text.indexOf(occ.surface) : Array.from(s.text).slice(0, occ.offset).join("").length;
+    if (pos < 0 || !s.text.startsWith(occ.surface, pos)) {
       span.textContent = s.text;
       span.title = "原文已经校对改过，这一处不再适用";
       return span;
@@ -104,7 +105,7 @@
   function card(entity) {
     const node = el("article", `term-card ${entity.status}`);
     node.dataset.key = entity.key;
-    const locked = submitting || busy();
+    const locked = submitting || busy() || loadedAt === null;
 
     const head = el("div", "term-head");
     const title = el("div", "term-title");
@@ -160,7 +161,7 @@
       box.addEventListener("change", () => {
         o.status = box.checked ? "pending" : "rejected";
         li.classList.toggle("excluded", !box.checked);
-        const occs = entity.occurrences.map(({ sentence_id, surface, status }) => ({ sentence_id, surface, status }));
+        const occs = entity.occurrences.map(({ sentence_id, surface, status, offset }) => ({ sentence_id, surface, status, offset }));
         change(entity, {});
         changes.get(entity.key).occurrences = occs;
       });
@@ -243,28 +244,32 @@
     emptyHint.textContent = all.length ? "这一类里没有术语。" : "没有扫描到需要统一译名的术语。";
     const awaiting = job.status === "awaiting_review";
     const translated = job.completed?.includes("translate");
-    notice.hidden = !awaiting && !(data.invalid > 0);
+    notice.hidden = !awaiting && !(data.invalid > 0) && !data.failed_chunks;
     notice.textContent = awaiting
       ? `扫描到 ${all.length} 个术语，${counts.pending} 个待审核。确认规范名称和译名后点击“完成审核，继续翻译”；仍待审核的术语不会使用。`
-      : `另有 ${data.invalid} 条扫描结果在原文里找不到对应的片段，已忽略。`;
+      : data.invalid > 0 ? `另有 ${data.invalid} 条扫描结果在原文里找不到对应的片段，已忽略。` : "";
     if (awaiting && data.invalid > 0) notice.textContent += `（另有 ${data.invalid} 条在原文里找不到，已忽略）`;
+    if (data.failed_chunks) notice.textContent += ` 有 ${data.failed_chunks} 个文本块扫描失败。`;
     continueBtn.querySelector("span").textContent = translated ? "保存并重新翻译" : "完成审核，继续翻译";
-    const locked = submitting || busy();
+    const locked = submitting || busy() || loadedAt === null;
     saveBtn.disabled = locked || changes.size === 0;
     continueBtn.disabled = locked || !(awaiting || data.review.finished || translated);
   }
 
   // ---- 读写 -----------------------------------------------------------
   async function load() {
+    if (changes.size || submitting || busy() || job.term_mode === "off") return;
+    const requestId = ++loadRequest;
     try {
       const res = await fetch(`/api/jobs/${job.id}/terms`);
       if (!res.ok) return;
-      data = await res.json();
+      const snapshot = await res.json();
+      if (requestId !== loadRequest || changes.size || submitting || busy() || snapshot.revision < job.revision) return;
+      data = snapshot;
     } catch {
       return; // 稍后任务状态更新时再试
     }
-    loadedAt = job.revision;
-    changes = new Map();
+    loadedAt = data.revision;
     setDirty();
     panel.hidden = !data.review;
     if (!data.review) return;
@@ -273,7 +278,7 @@
   }
 
   async function submit(action, extra = {}) {
-    if (submitting || busy()) return;
+    if (submitting || busy() || loadedAt === null) return;
     if (action === "continue" && job.completed?.includes("translate") &&
         !window.confirm("会按审核结果重新翻译，覆盖校对过的译文。确定继续吗？")) return;
     submitting = true;
@@ -283,12 +288,14 @@
       const res = await fetch(`/api/jobs/${job.id}/terms`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ revision: job.revision, action, updates: [...changes.values()], ...extra }),
+        body: JSON.stringify({ revision: loadedAt, action, updates: [...changes.values()], ...extra }),
       });
       const result = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(result.error || `HTTP ${res.status}`);
       job = result;
       changes = new Map();
+      loadedAt = null;
+      setDirty();
       // 让 job.js 换上新的任务版本；继续处理时它会开始轮询进度
       const name = action === "continue" ? "yakumi:job-submitted" : "yakumi:job-refresh";
       document.dispatchEvent(new CustomEvent(name, { detail: result }));
@@ -319,7 +326,7 @@
       return;
     }
     // 扫描刚完成或审核数据在别处改过时重新读取；有未保存的修改时不覆盖
-    if (!changes.size && (loadedAt === null || before.status !== job.status || (job.revision !== loadedAt && !submitting))) load();
+    if (!changes.size && !submitting && (loadedAt === null || before.status !== job.status || job.revision !== loadedAt)) load();
     else if (data?.review) render();
   });
 

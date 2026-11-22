@@ -244,9 +244,43 @@ def test_url_job_failure(fake_cfg, fake_ytdlp, monkeypatch):
     monkeypatch.setenv("FAKE_YTDLP_FAIL", "1")
     app = create_app(cfg=fake_cfg)
     client = app.test_client()
-    job_id = client.post("/api/jobs", data={"mode": "url", "url": "https://8.8.8.8/x"}).get_json()["id"]
+    job_id = client.post("/api/jobs", data={"mode": "url", "url": "https://8.8.8.8/x", "burn": "true"}).get_json()["id"]
     state = wait_idle(app, client, job_id)
     assert state["status"] == "error" and "Unsupported URL" in state["error"]
+    monkeypatch.delenv("FAKE_YTDLP_FAIL")
+    resp = client.post(f"/api/jobs/{job_id}/render", json={"format": "srt", "burn": True, "revision": state["revision"]})
+    assert resp.status_code == 200
+    assert wait_idle(app, client, job_id)["files"]["video"]
+
+
+def test_invalid_download_port_has_domain_error():
+    with pytest.raises(download.DownloadError, match="视频链接"):
+        download.check_url("https://example.invalid:invalid/video")
+
+
+@pytest.mark.parametrize(("program", "message"), [
+    ("import time; time.sleep(30)", "超过时限"),
+    ("from pathlib import Path; Path('download.mp4').write_bytes(b'x' * 1048577)", "超过大小上限"),
+])
+def test_download_enforces_limits_without_progress(tmp_path, monkeypatch, program, message):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(download, "ytdlp_command", lambda _: [sys.executable, "-c", program])
+    cfg = {"allow_private": True, "max_size_mb": 1, "max_duration_seconds": 1}
+    started = time.monotonic()
+    with pytest.raises(download.DownloadError, match=message):
+        download.download("https://example.invalid/video", tmp_path, cfg)
+    assert time.monotonic() - started < 5
+
+
+def test_download_rejects_reported_output_outside_job(tmp_path, monkeypatch):
+    output = tmp_path / "download.mp4"
+    output.touch()
+    job = tmp_path / "job"
+    job.mkdir()
+    program = f"print({('YAKUMI-FILE ' + str(output))!r})"
+    monkeypatch.setattr(download, "ytdlp_command", lambda _: [sys.executable, "-c", program])
+    with pytest.raises(download.DownloadError, match="不在当前任务"):
+        download.download("https://example.invalid/video", job, {"allow_private": True})
 
 
 @pytest.mark.parametrize("url, message", [

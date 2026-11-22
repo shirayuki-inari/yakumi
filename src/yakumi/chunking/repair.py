@@ -156,29 +156,31 @@ def apply_repair(words: list[Word], repaired: list[Word], region: Region, durati
         return None
     # 左端：原序列 → 修复结果
     if lo <= 0:
-        a_end, b_start = 0, 0
+        before, replacement_right = range(0), range(len(repaired))
     else:
         z_lo, z_hi = lo + edge, lo + edge + zone
         cut = (z_lo + z_hi) / 2
         a_win = AudioWindow(-1, 0, z_hi, 0, cut, None, "forced")
         b_win = AudioWindow(-2, z_lo, hi, cut, hi, "forced", None)
-        a_end, b_start, rep = splice(words, repaired, a_win, b_win, tolerance)
+        before, replacement_right, rep = splice(words, repaired, a_win, b_win, tolerance)
         if rep.strategy != "lcs" and (_zone_words(words, z_lo, z_hi) or _zone_words(repaired, z_lo, z_hi)):
             return None
     # 右端：修复结果 → 原序列
     if hi >= duration:
-        c_end, d_start = len(repaired), len(words)
+        replacement_left, after = range(len(repaired)), range(0)
     else:
         z_lo, z_hi = hi - edge - zone, hi - edge
         cut = (z_lo + z_hi) / 2
         a_win = AudioWindow(-2, lo, z_hi, lo, cut, None, "forced")
         b_win = AudioWindow(-1, z_lo, duration, cut, duration, "forced", None)
-        c_end, d_start, rep = splice(repaired, words, a_win, b_win, tolerance)
+        replacement_left, after, rep = splice(repaired, words, a_win, b_win, tolerance)
         if rep.strategy != "lcs" and (_zone_words(words, z_lo, z_hi) or _zone_words(repaired, z_lo, z_hi)):
             return None
-    if b_start > c_end or a_end > d_start:
+    if ((replacement_left and replacement_right and replacement_right[0] > replacement_left[-1] + 1)
+            or (before and after and before[-1] >= after[0])):
         return None
-    return clean_words(words[:a_end] + repaired[b_start:c_end] + words[d_start:])
+    replacement = set(replacement_left).intersection(replacement_right)
+    return clean_words([words[i] for i in before] + [repaired[i] for i in sorted(replacement)] + [words[i] for i in after])
 
 
 def accept(issue: Issue, before: Score, after: Score) -> tuple[bool, str]:

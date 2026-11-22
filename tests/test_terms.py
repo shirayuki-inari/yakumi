@@ -131,8 +131,8 @@ def test_resolver_links_library_and_merges_aliases():
     assert koyori.status == "pending" and not koyori.auto and koyori.translation == "博衣小夜璃"
     assert koyori.surfaces == ["博士小寄り", "こより"] and koyori.confidence == "medium"
     sites = [(o.sentence_id, o.surface, o.found_by) for o in koyori.occurrences]
-    assert sites == [(1, "博士小寄り", "model"), (2, "こより", "model"), (3, "博士小寄り", "search"),
-                     (3, "こより", "search"), (5, "こより", "search")]
+    assert sites == [(1, "博士小寄り", "model"), (2, "こより", "model"), (3, "こより", "search"),
+                     (3, "博士小寄り", "search"), (5, "こより", "search")]
     assert by["new:すこん部"].canonical == "すこん部" and by["new:すこん部"].translation is None
     assert by["new:白髪"].canonical is None and by["new:白髪"].status == "pending"
 
@@ -174,12 +174,13 @@ def test_review_updates_merge_and_export():
     assert rv.approved_terms(review) == (
         [gs.Entry(canonical="博衣こより", id="job:" + key, category="person", aliases=["こよ", "こより"],
                   translations={"zh": "小夜璃"})],
-        [{"sentence_id": 0, "surface": "博士小寄り", "entity": "job:" + key},
-         {"sentence_id": 1, "surface": "こより", "entity": "job:" + key}])
+        [{"sentence_id": 0, "surface": "博士小寄り", "entity": "job:" + key, "offset": 0},
+         {"sentence_id": 1, "surface": "こより", "entity": "job:" + key, "offset": 0},
+         {"sentence_id": 2, "surface": "こより", "entity": "job:" + key, "offset": 3, "rejected": True}])
     merged = rv.merge(review, key, ["new:白髪"])
     assert len(review.entities) == 1 and "白髪" in merged.surfaces
     assert [(o.sentence_id, o.surface) for o in merged.occurrences] == [
-        (0, "博士小寄り"), (1, "こより"), (2, "こより"), (2, "白髪"), (3, "白髪")]
+        (0, "博士小寄り"), (1, "こより"), (2, "白髪"), (2, "こより"), (3, "白髪")]
     assert rv.Review.from_dict(json.loads(json.dumps(review.to_dict()))).to_dict() == review.to_dict()
 
 
@@ -204,6 +205,37 @@ def test_carry_over_keeps_decisions():
     assert by["new:白髪"].status == "rejected"
     assert by["new:博衣こより"].translation == "可萝莉" and by["new:博衣こより"].status == "pending"
     assert [o.status for o in by["new:博衣こより"].occurrences if o.sentence_id == 1] == ["rejected"]
+
+
+def test_rescan_replays_manual_merge_and_category_change():
+    old = make_review()
+    key = "new:博衣こより"
+    rv.merge(old, key, ["new:白髪"])
+    rv.apply_update(old, {"key": key, "category": "work", "status": "approved"})
+    old = rv.Review.from_dict(old.to_dict())
+    new = make_review()
+    rv.carry_over(new, old)
+    [entity] = new.entities
+    assert entity.key == key and entity.category == "work" and entity.status == "approved"
+    assert entity.merged_keys == ["new:白髪"] and "白髪" in entity.surfaces
+
+    omitted = rv.Review("zh")
+    rv.carry_over(omitted, new)
+    assert omitted.entities == [] and [e.key for e in omitted.archived] == [key]
+    returned = make_review()
+    rv.carry_over(returned, rv.Review.from_dict(omitted.to_dict()))
+    assert [e.key for e in returned.entities] == [key] and returned.entities[0].status == "approved"
+
+    # 第 4 版只有已合并的称呼和位置，可据此把两个候选重新合到同一实体。
+    legacy_data = old.to_dict()
+    item = legacy_data["entities"][0]
+    item.pop("merged_keys")
+    item.pop("overrides")
+    for occurrence in item["occurrences"]:
+        occurrence.pop("offset")
+    current = make_review()
+    rv.carry_over(current, rv.Review.from_dict(legacy_data))
+    assert [e.key for e in current.entities] == [key]
 
 
 def test_save_to_library_keeps_asr_errors_out():
@@ -416,10 +448,32 @@ def test_reviewed_variant_linked_to_library_entity_keeps_location():
     for key, canonical in (("new:koyori", "博衣こより"), ("new:新人", "同名"), ("new:新人2", "同名")):
         rv.apply_update(review, {"key": key, "status": "approved", "canonical": canonical})
     tcfg = translation_config({"glossary": {}}, ["g"], "", rv.approved_terms(review))
-    terms = gs.TermSet(gs.entries_from_any(tcfg["glossary"]), tcfg["term_occurrences"])
-    assert terms.hints(["やあ koyori です"], [0], "zh") == ["- 博衣こより → 小夜璃",
-                                                       "- 第 1 行的「koyori」指「博衣こより」，按它翻译"]
+    terms = gs.TermSet(gs.entries_from_any(tcfg["glossary"]), tcfg["term_occurrences"],
+                       gs.entries_from_any(tcfg["term_global_entries"]))
+    [hint] = terms.hints(["やあ koyori です"], [0], "zh")
+    assert "第 1 行的「koyori」指「博衣こより」" in hint and "博衣こより → 小夜璃" in hint
     assert any("「新人さん」指「同名」" in x for x in terms.hints(["新人さんです"], [2], "zh"))
+
+
+def test_same_surface_can_be_rejected_at_only_one_location():
+    from yakumi.pipeline import translation_config
+    from yakumi.translate import create_translator
+    from yakumi.translate.grouped import cue_locations
+
+    gs.save(gs.Glossary(name="g", entries=[gs.Entry("Alice", translations={"zh": "库译名"})]))
+    review = rv.Review("zh", resolve([cand(0, "Alice")], S("Alice and Alice"), gs.load("g").entries, "zh"))
+    [entity] = review.entities
+    assert [o.offset for o in entity.occurrences] == [0, 10]
+    rv.apply_update(review, {"key": entity.key, "translation": "任务译名",
+                             "occurrences": [{"sentence_id": 0, "surface": "Alice", "offset": 0, "status": "rejected"}]})
+    conf = translation_config({"provider": "fake"}, ["g"], "", rv.approved_terms(review))
+    terms = create_translator(conf).terms
+    [hint] = terms.hints(["Alice and Alice"], [0], "zh")
+    assert "第 11 字起" in hint and "任务译名" in hint
+    cues = [Segment(0, 1, "Alice", group=0), Segment(1, 2, "and Alice", group=0)]
+    first, second = cue_locations(cues)
+    assert terms.hints([cues[0].text], [first], "zh") == []
+    assert "第 5 字起" in terms.hints([cues[1].text], [second], "zh")[0]
 
 
 def test_legacy_keys_differing_only_by_width_still_load(tmp_path):
@@ -449,6 +503,26 @@ def test_web_disable_on_finished_job_is_not_busy(fake_cfg):
     assert resp.get_json()["busy"] is False and resp.get_json()["term_mode"] == "off"
 
 
+def test_term_export_validates_entire_batch_before_saving(fake_cfg):
+    gs.save(gs.Glossary(name="g"))
+    job = subtitle_job(fake_cfg)
+    run(job, fake_cfg)
+    review = rv.load_review(job.dir)
+    key = review.entities[0].key
+    client = create_app(cfg=fake_cfg).test_client()
+    url = f"/api/jobs/{job.state.id}/terms"
+    payload = {"revision": client.get(url).get_json()["revision"],
+               "updates": [{"key": key, "status": "approved", "canonical": "Koyori"}],
+               "save_to": [{"key": key, "glossary": "g"}, {"key": "missing", "glossary": "g"}]}
+    assert client.post(url, json=payload).status_code == 400
+    assert gs.load("g").entries == []
+    assert rv.load_review(job.dir).find(key).status == "pending"
+    payload["save_to"].pop()
+    assert client.post(url, json=payload).status_code == 200
+    assert gs.load("g").entries[0].canonical == "Koyori"
+    assert client.post(url, json=payload).status_code == 409
+
+
 def test_cli_auto_mode_does_not_retranslate_on_rerun(make_video, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "yakumi.toml").write_text('[chunking]\nvad = "energy"\n[segment]\nmode = "rules"\n', encoding="utf-8")
@@ -460,3 +534,10 @@ def test_cli_auto_mode_does_not_retranslate_on_rerun(make_video, tmp_path, monke
     assert runner.invoke(main, args).exit_code == 0
     res = runner.invoke(main, args)
     assert res.exit_code == 0 and "重新处理" not in res.output
+    library = gs.load("g")
+    library.entries[0].translations["*"] = "新的固定译名"
+    gs.save(library)
+    res = runner.invoke(main, args + ["--notes", "更新背景"])
+    assert res.exit_code == 0 and "从「术语扫描」重新处理" in res.output
+    job_path = next((tmp_path / ".yakumi" / "jobs").iterdir())
+    assert "新的固定译名" in (job_path / "glossary.json").read_text(encoding="utf-8")

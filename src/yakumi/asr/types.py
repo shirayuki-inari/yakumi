@@ -50,6 +50,7 @@ class ASRCapabilities:
     max_window: float = INF  # 单次请求的硬上限（秒）
     target_window: float = INF  # 词级模式的默认目标窗口
     timeout: float | None = None  # 服务端单次请求超时（秒）
+    segment_timestamps: bool = False
 
 
 @dataclass

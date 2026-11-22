@@ -138,6 +138,8 @@ format = "bv*[height<=1080]+ba/b[height<=1080]/b"   # 交给 yt-dlp 的 -f 参�
 ytdlp = ""               # yt-dlp 程序路径；留空时自动查找（Python 模块或 PATH 里的 yt-dlp）
 extra_args = []          # 额外传给 yt-dlp 的参数，例如 ["--cookies", "~/cookies.txt"]
 allow_private = false    # 是否允许下载本机、局域网地址的链接
+max_duration_seconds = 3600  # 单个链接的下载时限（秒）
+max_size_mb = 4096            # 任务的下载文件与部分文件总量上限（MB）
 
 [workspace]
 dir = ".yakumi"          # 任务目录（相对于运行命令时的当前目录）

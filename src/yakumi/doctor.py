@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -126,12 +125,11 @@ def _asr_checks(asr: dict[str, Any]) -> list[Check]:
         f"窗口 {asr['target_window']} 秒（上限 {asr['max_window']} 秒），上传格式 {asr.get('upload_format', 'flac')}",
     ])
     from .asr import create_asr
-    from .chunking.transcribe import capability_cache_path
+    from .chunking.transcribe import cached_capability
 
-    cache = capability_cache_path()
     try:
         key = create_asr(asr).cache_key  # type: ignore[attr-defined]  # 只有 OpenAI 兼容后端有探测缓存
-        entry = json.loads(cache.read_text(encoding="utf-8")).get(key) if cache.is_file() else None
+        entry = cached_capability(key)
     except (OSError, ValueError, AttributeError):
         entry = None
     if entry:

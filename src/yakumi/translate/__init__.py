@@ -14,6 +14,7 @@ def create_translator(cfg: dict[str, Any], target: str = "zh") -> Translator:
         "notes": str(cfg.get("notes", "") or ""),
         "source_kind": str(cfg.get("source_kind", "asr")),
         "term_occurrences": cfg.get("term_occurrences") or None,
+        "term_global_entries": cfg.get("term_global_entries"),
     }
     provider = cfg.get("provider", "openai")
     if provider == "openai":

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from ..asr.types import Word
 from ..models import Segment
-from ..text import char_limit, is_cjk, join_texts
+from ..text import CJK_RE, char_limit, is_cjk, join_texts
 from .common import CLAUSE_END, SENTENCE_END, Span, ends_clause, ends_sentence, gap_after
 
 TINY_CJK = 3
@@ -94,17 +94,37 @@ def sentence_cues(words: list[Word], span: Span, cue_gap: float, max_chars: int,
 
 
 def fix_timing(cues: list[Segment], min_duration: float) -> list[Segment]:
-    """去掉重叠，保证时长为正；过短的字幕条在不碰到下一条的前提下延长到 min_duration。"""
+    """去掉重叠，保证时长为正；过短的字幕条延长到 min_duration，不与相邻字幕条重叠。
+
+    先往后延长到下一条开始为止；仍然不够时（识别给出的时间戳重叠或挤在一起，
+    例如这一条和下一条的开始时间相同），提前到上一条结束后的空档里，
+    再不够才推迟下一条的开始（下一条自己至少保留 min_duration）。
+    """
+    starts: list[int] = []
+    for cue in cues:
+        earliest = starts[-1] + 1 if starts else 0
+        starts.append(max(earliest, round(cue.start * 1000)))
+    ends = [max(round(cue.end * 1000), start + 1) for cue, start in zip(cues, starts)]
+    minimum = max(1, round(min_duration * 1000))
+    prev_end = 0
     for idx, cue in enumerate(cues):
-        nxt = cues[idx + 1].start if idx + 1 < len(cues) else None
-        if nxt is not None and cue.end > nxt:
-            cue.end = nxt
-        if cue.end - cue.start < min_duration:
-            want = cue.start + min_duration
-            cue.end = min(want, nxt) if nxt is not None else want
-        if cue.end <= cue.start:
-            cue.end = cue.start + 0.1
-        cue.start, cue.end = round(cue.start, 3), round(cue.end, 3)
+        start = starts[idx]
+        end = max(ends[idx], start + minimum)
+        has_next = idx + 1 < len(starts)
+        if has_next:
+            end = min(end, starts[idx + 1])
+        if end - start < minimum:
+            start = max(prev_end, min(start, end - minimum))
+        if end - start < minimum and has_next:
+            nxt = idx + 1
+            room = ends[nxt] - minimum - starts[nxt]  # 下一条保留 min_duration 后多出的时间
+            if nxt + 1 < len(starts):
+                room = min(room, starts[nxt + 1] - 1 - starts[nxt])
+            delay = max(0, min(minimum - (end - start), room))
+            starts[nxt] += delay
+            end += delay
+        cue.start, cue.end = start / 1000, end / 1000
+        prev_end = end
     return cues
 
 
@@ -129,13 +149,23 @@ def _text_split_point(text: str) -> int | None:
         cands = [c for c in cands if 0 < c < n]
         return min(cands, key=lambda c: abs(c - mid)) if cands else None
 
+    spaces = []
+    cjk_boundaries = []
+    for i in range(1, n):
+        left, right = text[i - 1], text[i]
+        if right == " " and i + 1 < n and not text[i + 1].isspace() and not left.isspace():
+            if not CJK_RE.search(left + text[i + 1]):
+                spaces.append(i)
+        elif not left.isspace() and not right.isspace() and CJK_RE.search(left + right):
+            cjk_boundaries.append(i)
+    allowed = spaces + cjk_boundaries
     for marks in (SENTENCE_END, CLAUSE_END):
-        cands = [i + 1 for i, ch in enumerate(text[:-1]) if ch in marks]
+        cands = [i for i in allowed if text[i - 1] in marks]
         # 只接受不太偏的切点，避免切出一两个字的碎片
         point = best([c for c in cands if n * 0.2 <= c <= n * 0.8])
         if point:
             return point
-    return best([i for i, ch in enumerate(text) if ch == " "]) or n // 2
+    return best(spaces) or best(cjk_boundaries)
 
 
 def split_by_ratio(seg: Segment, max_duration: float, max_chars: int, max_chars_cjk: int) -> list[Segment]:
@@ -145,9 +175,9 @@ def split_by_ratio(seg: Segment, max_duration: float, max_chars: int, max_chars_
     if (len(text) <= char_limit(text, max_chars, max_chars_cjk) and duration <= max_duration) or len(text) < 4:
         return [seg]
     point = _text_split_point(text)
-    left, right = text[:point].strip(), text[point:].strip()
-    if not point or not left or not right:
+    if point is None:
         return [seg]
+    left, right = text[:point].strip(), text[point:].strip()
     cut = seg.start + duration * len(left) / (len(left) + len(right))
     return (split_by_ratio(Segment(seg.start, cut, left), max_duration, max_chars, max_chars_cjk)
             + split_by_ratio(Segment(cut, seg.end, right), max_duration, max_chars, max_chars_cjk))

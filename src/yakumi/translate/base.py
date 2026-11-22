@@ -21,8 +21,9 @@ from typing import Callable
 
 from typing import Any
 
-from ..glossary import TermSet, entries_from_any
+from ..glossary import TermLocation, TermLocations, TermSet, entries_from_any
 from ..llm import LLMError
+from .punct import prompt_rule
 
 LANG_NAMES = {
     "zh": "简体中文", "zh-cn": "简体中文", "zh-hans": "简体中文",
@@ -68,11 +69,12 @@ def parse_numbered(text: str) -> dict[int, str]:
 class Translator(ABC):
     def __init__(self, batch_size: int = 30, style: str = "", glossary: Any = None,
                  context_lines: int = 3, concurrency: int = 1, notes: str = "", source_kind: str = "asr",
-                 term_occurrences: list[dict[str, Any]] | None = None):
+                 term_occurrences: list[dict[str, Any]] | None = None, term_global_entries: Any = None):
         self.batch_size = max(1, int(batch_size))
         self.style = style
         # 固定译法：实体列表（旧格式的 {原文: 译文} 也可以），加上任务审核确认的片段位置
-        self.terms = TermSet(entries_from_any(glossary), term_occurrences)
+        self.terms = TermSet(entries_from_any(glossary), term_occurrences,
+                             None if term_global_entries is None else entries_from_any(term_global_entries))
         self.notes = notes.strip()
         self.source_kind = source_kind  # asr：原文是语音识别结果；subtitle：已有的字幕文件
         self.target: str | None = None  # 目标语言，选择实体的译名时使用，由 prepare() 设置
@@ -90,6 +92,7 @@ class Translator(ABC):
             "要求：口语化、简洁，适合在屏幕上快速阅读；结合上下文保持人名和术语一致；"
             "不要添加解释或注释。",
             SOURCE_NOTES.get(self.source_kind, SOURCE_NOTES["asr"]),
+            prompt_rule(target),
             *format_rules,
         ]
         if self.style:
@@ -105,7 +108,7 @@ class Translator(ABC):
         """翻译前调用：记下目标语言。"""
         self.target = target
 
-    def term_block(self, texts: list[str], ids: list[int] | None = None) -> str:
+    def term_block(self, texts: list[str], ids: TermLocations | None = None) -> str:
         """这一批原文（每行一项，ids 为对应的句子编号）需要遵守的术语，放在请求里。"""
         return self.terms.block(texts, ids, self.target)
 
@@ -128,7 +131,7 @@ class Translator(ABC):
         return "\n".join(out)
 
     def _translate_batch(self, system: str, lines: list[str], context: list[tuple[str, str | None]],
-                         ids: list[int] | None = None) -> list[str] | None:
+                         ids: TermLocations | None = None) -> list[str] | None:
         expected = set(range(1, len(lines) + 1))
         terms = self.term_block(lines, ids)
         for _ in range(2):
@@ -138,7 +141,7 @@ class Translator(ABC):
         return None
 
     def _translate_single(self, system: str, line: str, context: list[tuple[str, str | None]],
-                          sid: int | None = None) -> str:
+                          sid: int | TermLocation | None = None) -> str:
         terms = self.term_block([line], None if sid is None else [sid])
         reply = self.complete(system, self.batch_prompt([line], context, terms))
         parsed = parse_numbered(reply)
@@ -146,25 +149,25 @@ class Translator(ABC):
             return parsed[1]
         # 模型没按格式输出时，直接把整段回复当作译文；回复为空则保留原文。
         raw = _THINK_RE.sub("", reply).strip()
-        return raw.split("|", 1)[-1].strip() if raw else line
+        return raw.split("|", 1)[-1].strip() or line
 
     def run_batch(self, system: str, batch: list[str], context: list[tuple[str, str | None]],
-                  ids: list[int] | None = None) -> list[str]:
+                  ids: TermLocations | None = None) -> list[str]:
         translated = self._translate_batch(system, batch, context, ids)
         if translated is None:
             translated = []
             for k, line in enumerate(batch):
-                ctx = (context + list(zip(batch, translated)))[-self.context_lines:]
+                ctx = (context + list(zip(batch, translated)))[-self.context_lines:] if self.context_lines else []
                 translated.append(self._translate_single(system, line, ctx, ids[k] if ids else None))
         return translated
 
     def translate(self, lines: list[str], target: str, source: str | None = None,
-                  progress: Progress | None = None, ids: list[int] | None = None) -> list[str]:
+                  progress: Progress | None = None, ids: TermLocations | None = None) -> list[str]:
         """逐行翻译。ids 为各行所属的句子编号（用于匹配任务审核的术语记录），可以不给。"""
         self.prepare(target)
         system = self.system_prompt(target, source)
 
-        def ids_of(start: int) -> list[int] | None:
+        def ids_of(start: int) -> TermLocations | None:
             return ids[start:start + self.batch_size] if ids else None
 
         total = len(lines)

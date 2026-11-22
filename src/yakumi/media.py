@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 
 class MediaError(RuntimeError):
@@ -21,8 +22,12 @@ def _bin(name: str) -> str:
     return path
 
 
-def _run(args: list[str], cwd: str | Path | None = None) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+def _run(args: list[str], cwd: str | Path | None = None,
+         timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+    try:
+        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise MediaError(f"{Path(args[0]).name} 探测媒体超时") from exc
     if proc.returncode != 0:
         tail = "\n".join(proc.stderr.strip().splitlines()[-8:])
         raise MediaError(f"{Path(args[0]).name} 执行失败：\n{tail}")
@@ -31,7 +36,8 @@ def _run(args: list[str], cwd: str | Path | None = None) -> subprocess.Completed
 
 def probe_duration(path: str | Path) -> float:
     proc = _run(
-        [_bin("ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)]
+        [_bin("ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "json", *_local_input(path)],
+        timeout=30,
     )
     try:
         return float(json.loads(proc.stdout)["format"]["duration"])
@@ -40,10 +46,7 @@ def probe_duration(path: str | Path) -> float:
 
 
 def has_audio(path: str | Path) -> bool:
-    proc = _run(
-        [_bin("ffprobe"), "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", str(path)]
-    )
-    return bool(proc.stdout.strip())
+    return bool(_audio_streams(path))
 
 
 _PREVIEW_FORMATS = {
@@ -59,6 +62,17 @@ _PREVIEW_FORMATS = {
     "aac": (None, "audio/aac"),
 }
 
+# 单文件媒体容器。排除播放列表和可以打开其他资源的输入格式。
+_LOCAL_FORMATS = (*_PREVIEW_FORMATS, "flv", "asf", "aiff", "au", "ac3", "eac3", "amr", "ape", "caf",
+                  "dts", "m4v", "mlp", "mpegvideo", "shorten", "tta", "truehd", "voc", "wv")
+
+
+def _local_input(path: str | Path, formats: tuple[str, ...] = _LOCAL_FORMATS, *, ffmpeg: bool = False) -> list[str]:
+    opts = ["-protocol_whitelist", "file", "-format_whitelist", ",".join(formats)]
+    if ffmpeg:
+        opts.append("-i")
+    return [*opts, str(Path(path).resolve())]
+
 
 def preview_mimetype(path: Path) -> str | None:
     """只允许探测到的已知音视频容器内联播放。"""
@@ -70,10 +84,9 @@ def preview_mimetype(path: Path) -> str | None:
 def _probe_preview(path: Path, *_identity: int) -> str | None:
     try:
         proc = subprocess.run(
-            [_bin("ffprobe"), "-v", "error", "-protocol_whitelist", "file",
-             "-format_whitelist", ",".join(_PREVIEW_FORMATS),
+            [_bin("ffprobe"), "-v", "error",
              "-show_entries", "format=format_name:stream=codec_type:stream_disposition=attached_pic",
-             "-of", "json", str(path)],
+             "-of", "json", *_local_input(path, tuple(_PREVIEW_FORMATS))],
             capture_output=True, text=True, timeout=10, check=True,
         )
         data = json.loads(proc.stdout)
@@ -111,28 +124,38 @@ def upload_suffix(fmt: str) -> str:
 
 def audio_codec(path: str | Path) -> str:
     """第一条音轨的编码名（例如 aac、opus、vorbis），没有音轨时返回空字符串。"""
-    proc = _run([_bin("ffprobe"), "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
-                 "-of", "csv=p=0", str(path)])
-    return proc.stdout.strip().splitlines()[0] if proc.stdout.strip() else ""
+    streams = _audio_streams(path)
+    return streams[0].get("codec_name", "") if streams else ""
+
+
+def _audio_streams(path: str | Path) -> list[dict[str, Any]]:
+    proc = _run([_bin("ffprobe"), "-v", "error", "-select_streams", "a", "-show_entries",
+                 "stream=index,codec_name,channels:stream_disposition=default", "-of", "json", *_local_input(path)],
+                timeout=30)
+    return json.loads(proc.stdout).get("streams", [])
+
+
+def _selected_audio(path: str | Path) -> dict[str, Any] | None:
+    return max(_audio_streams(path), default=None,
+               key=lambda s: (s.get("disposition", {}).get("default", 0), s.get("channels", 0), -s["index"]))
 
 
 def extract_audio(video: str | Path, out: str | Path) -> Path:
     """抽取 16kHz 单声道 16 位音频，编码由扩展名决定（.wav / .flac / .mp3）。"""
-    if not has_audio(video):
+    stream = _selected_audio(video)
+    if stream is None:
         raise MediaError("视频里没有音轨")
     out = Path(out)
     codec = CODECS.get(out.suffix.lower(), CODECS[".wav"])
-    _run([_bin("ffmpeg"), "-y", "-v", "error", "-i", str(video), "-vn", "-ac", "1", "-ar", "16000",
+    _run([_bin("ffmpeg"), "-nostdin", "-y", "-v", "error", *_local_input(video, ffmpeg=True),
+          "-map", f"0:{stream['index']}", "-vn", "-ac", "1", "-ar", "16000",
           *codec, str(out)])
     return out
 
 
 def extract_wav(src: str | Path, out: str | Path) -> Path:
     """whisper.cpp 需要 16kHz 单声道 WAV。"""
-    out = Path(out)
-    _run([_bin("ffmpeg"), "-y", "-v", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000",
-          "-c:a", "pcm_s16le", str(out)])
-    return out
+    return extract_audio(src, out)
 
 
 def extract_clip(src: str | Path, start: float, end: float, out: str | Path) -> Path:
@@ -144,8 +167,8 @@ def extract_clip(src: str | Path, start: float, end: float, out: str | Path) -> 
     """
     out = Path(out)
     codec = CODECS.get(out.suffix.lower(), CODECS[".flac"])
-    _run([_bin("ffmpeg"), "-y", "-v", "error", "-ss", f"{max(0.0, start):.3f}", "-t", f"{end - start:.3f}",
-          "-i", str(src), "-vn", "-af", "asetnsamples=n=4096:p=0", "-ac", "1", "-ar", "16000",
+    _run([_bin("ffmpeg"), "-nostdin", "-y", "-v", "error", "-ss", f"{max(0.0, start):.3f}", "-t", f"{end - start:.3f}",
+          *_local_input(src, ffmpeg=True), "-vn", "-af", "asetnsamples=n=4096:p=0", "-ac", "1", "-ar", "16000",
           *codec, str(out)])
     return out
 
@@ -178,8 +201,12 @@ def burn_subtitles(video: str | Path, subtitles: str | Path, out: str | Path,
         if subtitles.suffix.lower() != ".ass":
             vf += f":force_style='{_style(font, font_size)}'"
         # WebM 常见的 Vorbis 音频放不进 MP4，这类情况转成 AAC，其余直接复制
-        audio = ["-c:a", "copy"] if audio_codec(video) in MP4_AUDIO else ["-c:a", "aac", "-b:a", "192k"]
-        _run([_bin("ffmpeg"), "-y", "-v", "error", "-i", str(video), "-vf", vf,
+        stream = _selected_audio(video)
+        audio = []
+        if stream is not None:
+            audio = ["-map", f"0:{stream['index']}"]
+            audio += ["-c:a", "copy"] if stream.get("codec_name") in MP4_AUDIO else ["-c:a", "aac", "-b:a", "192k"]
+        _run([_bin("ffmpeg"), "-nostdin", "-y", "-v", "error", *_local_input(video, ffmpeg=True), "-map", "0:V:0", "-vf", vf,
               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", *audio, str(out)], cwd=tmp)
     return out
 

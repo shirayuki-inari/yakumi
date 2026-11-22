@@ -85,3 +85,36 @@ def test_atomic_json_writers_use_independent_temporary_files(tmp_path, monkeypat
 
     assert files.read_json(path) in ({"value": 1}, {"value": 2})
     assert list(tmp_path.iterdir()) == [path]
+
+
+def test_job_creation_allocates_a_fresh_directory(tmp_path, monkeypatch):
+    allocated = iter(("existing", "existing", "new"))
+    monkeypatch.setattr(pipeline, "new_job_id", lambda: next(allocated))
+    first = Job.create(tmp_path, None, "zh")
+    first.path("windows.json").write_text("{}", encoding="utf-8")
+    second = Job.create(tmp_path, None, "en")
+    assert second.state.id == "new" and not second.path("windows.json").exists()
+    assert Job.load(tmp_path, "existing").state.target_lang == "zh"
+    with pytest.raises(pipeline.PipelineError, match="任务已存在"):
+        Job.create(tmp_path, None, "en", job_id="existing")
+
+
+def test_translation_checkpoint_survives_interrupt_before_export(fake_cfg, monkeypatch):
+    workspace = fake_cfg["workspace"]["dir"]
+    job = Job.create(workspace, None, "zh")
+    job.import_subtitles([Segment(0, 1, "Original")])
+    save = job.save
+
+    def stop_before_export():
+        if job.state.stage == "write":
+            raise KeyboardInterrupt
+        save()
+
+    monkeypatch.setattr(job, "save", stop_before_export)
+    with pytest.raises(KeyboardInterrupt):
+        run(job, fake_cfg)
+    resumed = Job.load(workspace, job.state.id)
+    assert resumed.path("translated.json").is_file() and "translate" in resumed.state.completed
+    monkeypatch.setitem(pipeline.STAGE_FUNCS, "translate", lambda *_: pytest.fail("重复翻译"))
+    run(resumed, fake_cfg)
+    assert resumed.subtitle_path.is_file()

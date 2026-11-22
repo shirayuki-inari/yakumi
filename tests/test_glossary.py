@@ -7,6 +7,43 @@ from click.testing import CliRunner
 from yakumi import glossary as gs
 from yakumi.cli import main
 from yakumi.pipeline import Job, PipelineError, run, translation_config
+
+
+def test_stale_glossary_snapshot_cannot_replace_a_newer_update():
+    saved = gs.save(gs.Glossary("共有"))
+    first, second = gs.load(saved.id), gs.load(saved.id)
+    first.notes, second.notes = "第一版", "旧草稿"
+    gs.save(first)
+    with pytest.raises(gs.GlossaryConflict, match="已更新"):
+        gs.save(second)
+    assert gs.load(saved.id).notes == "第一版"
+
+
+def test_glossary_notes_round_trip_and_rename_failure_preserves_old_file(monkeypatch):
+    g = gs.save(gs.Glossary("旧名称", notes="一\x01行\x7f"))
+    assert gs.load(g.id).notes == g.notes
+    old_id, g.name = g.id, "新名称"
+
+    def fail_rename(*_):
+        raise OSError("写入失败")
+
+    monkeypatch.setattr(gs, "_write_file", fail_rename)
+    with pytest.raises(OSError, match="写入失败"):
+        gs.save(g, old_id=old_id)
+    assert gs.load(old_id).notes == g.notes
+    assert not gs.path_of(g.id).exists()
+
+
+def test_glossary_batch_restores_written_files_if_commit_fails():
+    guide = gs.save(gs.Glossary("g", notes="原始资料"))
+    guide.notes = "尝试修改"
+
+    def fail_commit():
+        raise OSError("审核无法写入")
+
+    with pytest.raises(OSError, match="审核无法写入"):
+        gs.save_many([guide], fail_commit)
+    assert gs.load("g").notes == "原始资料"
 from yakumi.translate.base import Translator
 from yakumi.translate.grouped import translate_cues
 from yakumi.models import Segment

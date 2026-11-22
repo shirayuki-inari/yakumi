@@ -98,6 +98,8 @@ def plan_windows(duration: float, speech: list[Region], p: PlanParams, start: fl
     lo = min(p.lo, hi)
     if hi <= 0:
         raise ValueError("max_window 太小，放不下两侧的重叠")
+    if not (math.isfinite(lo) and math.isfinite(hi) and lo >= 0.001 and p.overlap >= 0):
+        raise ValueError("识别窗口参数无效，切点必须至少向前推进 1 毫秒")
     gaps = gaps_of(speech, duration)
     boundaries: list[Boundary] = []
     cursor = start
@@ -113,10 +115,10 @@ def plan_windows(duration: float, speech: list[Region], p: PlanParams, start: fl
 def params_for(caps: ASRCapabilities, cfg: dict[str, Any], word_mode: bool | None = None) -> PlanParams | None:
     """根据后端能力和 [chunking] 配置得到规划参数；后端不需要切分时返回 None。"""
     word_mode = caps.word_timestamps if word_mode is None else word_mode
+    if math.isinf(caps.max_window) and math.isinf(caps.target_window):
+        return None
     common = dict(min_gap=float(cfg["min_gap"]), overlap=float(cfg["overlap"]))
     if word_mode:
-        if math.isinf(caps.max_window) and math.isinf(caps.target_window):
-            return None
         target = min(caps.target_window, caps.max_window)
         tol = float(cfg["tolerance"])
         return PlanParams(target=target, lo=target * (1 - tol), hi=target * (1 + tol),
@@ -127,8 +129,11 @@ def params_for(caps: ASRCapabilities, cfg: dict[str, Any], word_mode: bool | Non
 
 def plan(duration: float, speech: list[Region], caps: ASRCapabilities, cfg: dict[str, Any],
          word_mode: bool | None = None) -> tuple[list[AudioWindow], list[Boundary]]:
-    p = params_for(caps, cfg, word_mode)
-    if p is None or duration <= p.hi:
+    return initial_windows(duration, speech, params_for(caps, cfg, word_mode))
+
+
+def initial_windows(duration: float, speech: list[Region], p: PlanParams | None) -> tuple[list[AudioWindow], list[Boundary]]:
+    if p is None or duration <= min(p.hi, p.max_window):
         return [AudioWindow(0, 0.0, duration, 0.0, duration)], []
     return plan_windows(duration, speech, p)
 
@@ -150,8 +155,8 @@ def split_window(window: AudioWindow, speech: list[Region], p: PlanParams,
     gaps = gaps_of(speech, window.end)
     cut = _pick_cut(gaps, a, b, mid, p.min_gap, p.overlap) or _forced_cut(gaps, a, b, mid, p.overlap)
     ext = cut.overlap
-    left = AudioWindow(window.index, window.start, round(cut.time + ext, 3), window.core_start,
+    left = AudioWindow(window.index, window.start, min(window.end, round(cut.time + ext, 3)), window.core_start,
                        round(cut.time, 3), window.left, cut.kind)
-    right = AudioWindow(window.index, round(cut.time - ext, 3), window.end, round(cut.time, 3),
+    right = AudioWindow(window.index, max(window.start, round(cut.time - ext, 3)), window.end, round(cut.time, 3),
                         window.core_end, cut.kind, window.right)
     return left, right, cut

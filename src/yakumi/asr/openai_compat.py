@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -103,7 +104,7 @@ class OpenAICompatASR:
             body = resp.json()
         except ValueError as exc:
             raise ASRError("语音识别接口返回的不是 JSON") from exc
-        result = parse_response(body)
+        result = parse_response(body, window.duration if window is not None else None)
         result.elapsed = time.monotonic() - t0
         return result
 
@@ -117,22 +118,51 @@ def _rejects_verbose(resp: httpx.Response) -> bool:
     return "verbose_json" in text or "response_format" in text or "timestamp" in text
 
 
-def parse_response(body: dict[str, Any]) -> RawTranscript:
-    words = []
-    for w in body.get("words") or []:
-        text = str(w.get("word", w.get("text", ""))).strip()
-        if text:
-            words.append(Word(float(w["start"]), float(w["end"]), text, w.get("confidence")))
-    segments = [
-        Segment(float(s["start"]), float(s["end"]), str(s.get("text", "")).strip())
-        for s in body.get("segments") or [] if str(s.get("text", "")).strip()
-    ]
-    usage = body.get("usage") or {}
-    cost = usage.get("cost")
-    return RawTranscript(
-        text=str(body.get("text") or "").strip(),
-        words=words,
-        segments=segments,
-        language=body.get("language"),
-        cost=float(cost) if cost is not None else None,
-    )
+def parse_response(body: Any, duration: float | None = None) -> RawTranscript:
+    def number(value: Any, label: str) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ASRError(f"语音识别响应中的{label}不是有效数字") from None
+        if isinstance(value, bool) or not math.isfinite(parsed):
+            raise ASRError(f"语音识别响应中的{label}不是有效数字")
+        return parsed
+
+    def timestamp(record: dict[str, Any], field: str) -> float:
+        value = number(record.get(field), "时间戳")
+        # 允许编码填充和服务端精度造成的小幅越界。零时长、反向词由词级合并校正。
+        if value < -1 or duration is not None and value > duration + 1:
+            raise ASRError("语音识别响应中的时间戳超出窗口")
+        return max(0.0, value) if duration is None else min(duration, max(0.0, value))
+
+    def items(field: str) -> list[dict[str, Any]]:
+        value = body.get(field)
+        if value is None:
+            return []
+        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+            raise ASRError(f"语音识别响应中的 {field} 应为对象列表")
+        return value
+
+    def text_value(value: Any) -> str:
+        if value is not None and not isinstance(value, str):
+            raise ASRError("语音识别响应中的文本字段格式不正确")
+        return value.strip() if value else ""
+
+    if not isinstance(body, dict):
+        raise ASRError("语音识别响应应为 JSON 对象")
+    words, segments = [], []
+    for word in items("words"):
+        if text := text_value(word.get("word", word.get("text"))):
+            confidence = word.get("confidence")
+            words.append(Word(timestamp(word, "start"), timestamp(word, "end"), text,
+                              None if confidence is None else number(confidence, "置信度")))
+    for segment in items("segments"):
+        if text := text_value(segment.get("text")):
+            segments.append(Segment(timestamp(segment, "start"), timestamp(segment, "end"), text))
+    usage = body.get("usage")
+    if usage is not None and not isinstance(usage, dict):
+        raise ASRError("语音识别响应中的 usage 应为对象")
+    cost = (usage or {}).get("cost")
+    return RawTranscript(text=text_value(body.get("text")), words=words, segments=segments,
+                         language=text_value(body.get("language")) or None,
+                         cost=None if cost is None else number(cost, "费用"))

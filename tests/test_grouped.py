@@ -3,7 +3,7 @@ import re
 
 import pytest
 
-from yakumi.models import Segment
+from yakumi.models import PIPELINE_VERSION, Segment
 from yakumi.pipeline import Job, run
 from yakumi.subtitle.formats import render
 from yakumi.subtitle.style import style_line
@@ -21,6 +21,13 @@ class Scripted(Translator):
     def complete(self, system, user):
         self.calls.append((system, user))
         return self.fn(system, user, len(self.calls))
+
+
+def test_separator_only_is_not_a_successful_translation():
+    assert split_parts("¦", 1) is None
+    tr = Scripted(lambda _system, _user, n: "1|¦" if n == 1 else "1|translated")
+    translations, counters = translate_cues(tr, [Segment(0, 1, "original")], "zh")
+    assert translations == ["translated"] and counters["split_retries"] == 1
 
 
 def numbered(user):
@@ -119,6 +126,37 @@ def test_cue_unit_uses_plain_translation():
     assert "¦" not in tr.calls[0][1]
 
 
+@pytest.mark.parametrize("text,expected", [
+    ("睡得着吗。", "睡得着吗？"),
+    ("“真的吗。”", "“真的吗？”"),
+    ("吗。那就好。", "吗。那就好。"),  # 只改句末的“吗。”
+    ("肚子…", "肚子……"),
+    ("预备—", "预备——"),
+    ("真的?好!", "真的？好！"),
+    ("喝点水～。", "喝点水～"),
+    ("躺下~", "躺下～"),
+    ("好像又、", "好像又，"),
+    ("苹果、香蕉", "苹果、香蕉"),  # 句中的顿号交给提示词
+    ("OK。", "OK。"),
+])
+def test_chinese_translation_punctuation_tidied(text, expected):
+    from yakumi.translate.punct import tidy_translation
+    assert tidy_translation(text, "zh") == expected
+    assert tidy_translation(text, "en") == text
+
+
+def test_translation_output_and_prompt_follow_target_punctuation():
+    cues = cues_of(["眠れる", "のかな。"], ["お水のまー。"])
+    tr = Scripted(lambda s, u, n: "1|睡得¦着吗。\n2|喝点水～。")
+    texts, _ = translate_cues(tr, cues, "zh", "ja")
+    assert texts == ["睡得", "着吗？", "喝点水～"]
+    system = tr.calls[0][0]
+    assert "疑问句用“？”" in system and "顿号“、”只用于并列" in system
+    tr = Scripted(lambda s, u, n: "1|Can¦you sleep?\n2|Have some water.")
+    translate_cues(tr, cues, "en", "ja")
+    assert "不要照搬原文的标点" in tr.calls[0][0] and "顿号" not in tr.calls[0][0]
+
+
 def test_split_parts():
     assert split_parts("a¦b", 2) == ["a", "b"]
     assert split_parts("a｜b", 2) == ["a", "b"]
@@ -194,7 +232,7 @@ def test_v3_job_keeps_transcription(fake_cfg, sample_video):
     job.path("state.json").write_text(json.dumps(data))
     loaded = Job.load(ws, job.state.id)
     assert loaded.state.completed == ["extract", "vad", "transcribe", "merge", "repair"]
-    assert loaded.state.pipeline_version == 4
+    assert loaded.state.pipeline_version == PIPELINE_VERSION
     assert sorted(p.name for p in loaded.path("pieces").iterdir()) == pieces
     assert not loaded.path("translated.json").exists()
     calls_before = loaded.state.stats["asr_requests"]

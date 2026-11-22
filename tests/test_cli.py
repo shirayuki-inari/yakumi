@@ -10,7 +10,7 @@ from yakumi.asr.base import ASRError
 from yakumi.asr.whisper_cpp import WhisperCppASR
 from yakumi.cli import main
 from yakumi.config import ConfigError, load_config, unknown_keys
-from yakumi.pipeline import Job, PipelineError
+from yakumi.pipeline import Job, PipelineError, run
 
 
 @pytest.fixture
@@ -176,6 +176,18 @@ def test_whisper_cpp_parses_segments(tmp_path, sample_video):
 def test_whisper_cpp_bad_json_is_asr_error(tmp_path, sample_video):
     with pytest.raises(ASRError, match="JSON"):
         _fake_whisper(tmp_path, "{not json").transcribe(sample_video)
+
+
+def test_whisper_cpp_pipeline_retains_segment_times(fake_cfg, tmp_path, make_video):
+    body = json.dumps({"transcription": [{"offsets": {"from": 7000, "to": 8500}, "text": "こんにちは"}]})
+    asr = _fake_whisper(tmp_path, body)
+    fake_cfg["asr"].update(provider="whisper_cpp", whisper_cpp_bin=asr.binary, whisper_cpp_model=asr.model)
+    fake_cfg["chunking"].update(vad="none", text_window=5)
+    fake_cfg["segment"]["mode"] = "rules"
+    job = Job.create(fake_cfg["workspace"]["dir"], make_video(10), None)
+    state = run(job, fake_cfg)
+    assert state.stats["windows"] == 1 and state.stats["mode"] == "segments"
+    assert [(cue.start, cue.end, cue.text) for cue in job.segments()] == [(7.0, 8.5, "こんにちは")]
 
 
 def test_upload_suffix_and_audio_codec(sample_video):

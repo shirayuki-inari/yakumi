@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import (DEFAULTS, ENV_MAP, LLM_SECTIONS, SERVICE_KEYS, ConfigError, build_config, config_files,
-                     inherited_llm_config, read_config_file, service_origin, user_config_path)
+                     inherited_llm_config, merge_config_layer, read_config_file, service_origin, user_config_path)
 
 REMOVE = object()
 
@@ -195,6 +195,8 @@ READONLY = [
     ("download.ytdlp", "yt-dlp 程序"),
     ("download.extra_args", "yt-dlp 额外参数"),
     ("download.allow_private", "允许下载内网链接"),
+    ("download.max_duration_seconds", "链接下载时限（秒）"),
+    ("download.max_size_mb", "链接下载大小上限（MB）"),
 ]
 SERVICE_SECTIONS = ("asr", "translate", *LLM_SECTIONS)
 
@@ -227,7 +229,17 @@ def _get(data: dict[str, Any], fid: str) -> Any:
 
 
 def _env_locks() -> dict[str, str]:
-    return {f"{section}.{key}": env for env, (section, key) in ENV_MAP.items() if os.environ.get(env)}
+    locks = {f"{section}.{key}": env for env, (section, key) in ENV_MAP.items() if os.environ.get(env)}
+    for section in ("asr", "translate"):
+        if key_env := locks.get(f"{section}.api_key"):
+            locks.setdefault(f"{section}.base_url", key_env)
+    return locks
+
+
+def _lock_message(fid: str, env: str) -> str:
+    if ".".join(ENV_MAP[env]) != fid:
+        return f"服务地址与环境变量 {env} 中的密钥绑定，请在部署配置中一起修改"
+    return f"由环境变量 {env} 设置，取消该变量后才能在这里修改"
 
 
 def _layers(config_path: str | Path | None) -> list[tuple[Path, dict[str, Any]]]:
@@ -246,7 +258,7 @@ def describe(config_path: str | Path | None = None) -> dict[str, Any]:
     fallback = build_config([data for path, data in layers if path != target])
 
     def source_of(fid: str, effective: Any) -> str:
-        if fid in locks:
+        if fid in locks and ".".join(ENV_MAP[locks[fid]]) == fid:
             return f"环境变量 {locks[fid]}"
         for path, data in reversed(layers):
             value = _get(data, fid)
@@ -264,7 +276,7 @@ def describe(config_path: str | Path | None = None) -> dict[str, Any]:
                 "min": f.min, "max": f.max, "placeholder": f.placeholder, "suggestions": list(f.suggestions),
                 "required": f.required, "show_if": f.show_if,
                 "in_target": _get(target_data, f.id) is not REMOVE,
-                "locked": f"由环境变量 {locks[f.id]} 设置，取消该变量后才能在这里修改" if f.id in locks else None,
+                "locked": _lock_message(f.id, locks[f.id]) if f.id in locks else None,
             }
             if f.kind == "secret":
                 effective = (inherited[section] if section in inherited else cfg[section]).get("api_key")
@@ -374,10 +386,10 @@ class SaveResult:
     path: Path
     notices: list[str] = field(default_factory=list)
     cfg: dict[str, Any] = field(default_factory=dict)
-    changed: list[str] = field(default_factory=list)  # 实际写入或删除的“段.键”
 
 
-def save(config_path: str | Path | None, changes: dict[str, Any]) -> SaveResult:
+def save(config_path: str | Path | None, changes: dict[str, Any], *,
+         active_cfg: dict[str, Any] | None = None) -> SaveResult:
     """校验并保存设置。`changes` 的键为“段.键”，值为 None 时从配置文件中删除这一项（恢复默认或上一层的值）。"""
     if not isinstance(changes, dict) or not changes:
         raise SettingsError("没有需要保存的修改")
@@ -388,7 +400,7 @@ def save(config_path: str | Path | None, changes: dict[str, Any]) -> SaveResult:
         if f is None:
             raise SettingsError(f"不能在网页上修改 {fid}")
         if fid in locks:
-            raise SettingsError(f"{f.label} 由环境变量 {locks[fid]} 设置，不能在这里修改")
+            raise SettingsError(f"{f.label}：{_lock_message(fid, locks[fid])}")
         updates[fid] = REMOVE if value is None else _normalize(f, value)
 
     target = config_target(config_path)
@@ -418,8 +430,25 @@ def save(config_path: str | Path | None, changes: dict[str, Any]) -> SaveResult:
         raise SettingsError(str(exc)) from exc
     _check_combined(after)
 
+    effective = after
+    if active_cfg is not None:
+        effective = copy.deepcopy(active_cfg)
+        layer: dict[str, dict[str, Any]] = {}
+        for fid, update in updates.items():
+            section, key = fid.split(".", 1)
+            # 盘上的后备密钥未必适用于嵌入方的服务地址。
+            value = "" if key == "api_key" and update is REMOVE else after[section].get(key)
+            layer.setdefault(section, {})[key] = value
+        merge_config_layer(effective, layer)
+        _check_combined(effective)
+        for section in SERVICE_SECTIONS:
+            fid = f"{section}.api_key"
+            if fid in updates and updates[fid] is not REMOVE and (
+                    service_origin(_service_url(effective, section)) != service_origin(_service_url(after, section))):
+                raise SettingsError(f"{section} 的运行地址与配置文件不同，请同时设置服务地址和密钥")
+
     result.notices += _write_toml(target, old_text, updates, after_data)
-    result.cfg, result.changed = after, list(updates)
+    result.cfg = effective
     return result
 
 

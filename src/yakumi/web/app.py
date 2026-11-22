@@ -36,9 +36,9 @@ from .. import download as downloader, glossary as glossary_store, media, settin
 from ..config import ConfigError, load_config
 from ..doctor import local_checks, online_checks, setup_problems
 from ..files import read_json, write_json
-from ..models import STAGES, JobState, Segment, segments_from_list
+from ..models import STAGES, JobState, Segment
 from ..stats import format_stats, stats_report
-from ..pipeline import STAGE_LABELS, Job, JobBusyError, PipelineError, enabled_stages, first_stage, run
+from ..pipeline import STAGE_LABELS, Job, JobBusyError, PipelineError, enabled_stages, first_stage, run, term_scan_context_changed
 from ..subtitle.formats import FORMATS, parse_srt
 from ..terms import MODES as TERM_MODES, sentences_from_cues
 from ..terms import review as term_review
@@ -305,13 +305,7 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
 
         任务目录和 [web] 在启动时确定，修改后需要重启。
         """
-        if injected:
-            new = copy.deepcopy(runner.cfg)
-            for fid in result.changed:
-                section, key = fid.split(".", 1)
-                new[section][key] = result.cfg[section][key]
-        else:
-            new = result.cfg
+        new = result.cfg
         new["workspace"]["dir"] = str(workspace)
         new["web"] = copy.deepcopy(fixed_web)
         runner.cfg = new
@@ -422,15 +416,20 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
         if (not isinstance(body.get("terms", {}), (dict, list)) or not isinstance(body.get("entries", []), list)
                 or not isinstance(body.get("notes", ""), str)):
             raise glossary_store.GlossaryError("数据格式不正确")
-        return glossary_store.Glossary.from_dict(body)
+        g = glossary_store.Glossary.from_dict(body)
+        g.revision = body.get("revision")
+        if g.revision is not None and not isinstance(g.revision, str):
+            raise glossary_store.GlossaryError("版本格式不正确")
+        return g
 
     @app.post("/api/glossaries")
     def api_glossary_create():
         try:
             g = _glossary_from_body()
-            if glossary_store.path_of(g.id).exists():
-                return jsonify(error=f"已经有名为“{g.name}”的背景资料"), 409
+            g.revision = ""
             glossary_store.save(g)
+        except glossary_store.GlossaryConflict as exc:
+            return jsonify(error=str(exc)), 409
         except glossary_store.GlossaryError as exc:
             return jsonify(error=str(exc)), 400
         return jsonify(g.to_dict()), 201
@@ -441,6 +440,8 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
             if not glossary_store.path_of(gid).is_file():
                 abort(404)
             g = _glossary_from_body()
+            if g.revision is None:
+                g.revision = glossary_store.load(gid).revision
             with ExitStack() as reservations:
                 jobs = []
                 if g.id != gid:
@@ -448,10 +449,14 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
                         if gid in state.glossaries:
                             reservations.enter_context(runner.reserve(state.id))
                             jobs.append(load(state.id))
-                glossary_store.save(g, old_id=gid)
-                for job in jobs:
-                    job.state.glossaries = [g.id if i == gid else i for i in job.state.glossaries]
-                    job.save()
+                def update_references() -> None:
+                    for job in jobs:
+                        job.state.glossaries = [g.id if i == gid else i for i in job.state.glossaries]
+                        job.save()
+
+                glossary_store.save(g, old_id=gid, update_references=update_references)
+        except glossary_store.GlossaryConflict as exc:
+            return jsonify(error=str(exc)), 409
         except glossary_store.GlossaryError as exc:
             return jsonify(error=str(exc)), 400
         return jsonify(g.to_dict())
@@ -459,7 +464,10 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
     @app.delete("/api/glossaries/<gid>")
     def api_glossary_delete(gid: str):
         try:
-            glossary_store.delete(gid)
+            revision = request.headers.get("If-Match")
+            glossary_store.delete(gid, revision=revision.strip('"') if revision else None)
+        except glossary_store.GlossaryConflict as exc:
+            return jsonify(error=str(exc)), 409
         except glossary_store.GlossaryError:
             abort(404)
         return jsonify(ok=True)
@@ -479,7 +487,7 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
             return jsonify(error="请求数据格式不正确"), 400
         with settings_lock:
             try:
-                result = settings_store.save(config_path, body["changes"])
+                result = settings_store.save(config_path, body["changes"], active_cfg=runner.cfg if injected else None)
             except (settings_store.SettingsError, ConfigError) as exc:
                 return jsonify(error=str(exc)), 400
             except OSError as exc:
@@ -570,6 +578,8 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
                 segments = parse_srt(raw.decode("utf-8-sig"))
             except UnicodeDecodeError:
                 return bad_request("字幕文件需要是 UTF-8 编码")
+            except ValueError as exc:
+                return bad_request(str(exc))
             if not segments:
                 return bad_request("字幕文件里没有找到带时间轴的字幕")
         tmp = None
@@ -664,7 +674,7 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
                 return jsonify(error="不支持的字幕格式"), 400
             if any(k in body and not isinstance(body[k], bool) for k in ("bilingual", "burn")):
                 return jsonify(error="导出选项格式不正确"), 400
-            if body.get("burn") and not st.video:
+            if body.get("burn") and not (st.video or st.source_url):
                 return jsonify(error="这个任务没有视频，不能烧录"), 400
             edited: list[Segment] = []
             if body.get("segments") is not None:
@@ -709,28 +719,39 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
             job.migrate()
             job.state.glossaries, job.state.notes = glossaries, notes.strip()[:4000]
             # 背景资料的内容可能改过，即使选择没变也重新翻译。
-            runner.submit(job, reservation, from_stage="translate")
+            start = "term_scan" if term_scan_context_changed(job, runner.cfg) else "translate"
+            runner.submit(job, reservation, from_stage=start)
         return jsonify(view(load(job_id)))
 
     # ---- 术语审核 API ---------------------------------------------------
     @app.get("/api/jobs/<job_id>/terms")
     def api_terms(job_id: str):
         """审核数据：实体、出现位置所在句子的原文和时间，以及可以保存到的背景资料。"""
+        try:
+            with Job.lock(workspace, job_id):
+                return term_view(job_id)
+        except JobBusyError:
+            raise
+        except PipelineError:
+            abort(404)
+
+    def term_view(job_id: str):
         job = load(job_id)
         review = term_review.load_review(job.dir) if job.state.term_mode != "off" else None
         data: dict[str, Any] = {"mode": job.state.term_mode, "revision": job.state.revision, "review": None,
                                 "glossaries": glossary_summaries(), "job_glossaries": job.state.glossaries}
         if review is None:
             return jsonify(data)
-        sentences = {}
-        if job.path("aligned.json").is_file():
-            wanted = {o.sentence_id for e in review.entities for o in e.occurrences}
-            sentences = {s.id: {"text": s.text, "start": s.start, "end": s.end}
-                         for s in sentences_from_cues(segments_from_list(read_json(job.path("aligned.json"))))
-                         if s.id in wanted}
+        wanted = {o.sentence_id for e in review.entities for o in e.occurrences}
+        sentences = {s.id: {"text": s.text, "start": s.start, "end": s.end}
+                     for s in sentences_from_cues(job.source_segments()) if s.id in wanted}
         found = read_json(job.path(term_review.CANDIDATES_FILE)) if job.path(term_review.CANDIDATES_FILE).is_file() else {}
-        data.update(review={**review.to_dict(), "summary": review.summary()}, sentences=sentences,
-                    invalid=len(found.get("invalid", [])), candidates=len(found.get("candidates", [])))
+        failed = found.get("failed_chunks", 0)
+        exported = review.to_dict()
+        exported.pop("archived", None)
+        data.update(review={**exported, "summary": review.summary()}, sentences=sentences,
+                    invalid=len(found.get("invalid", [])) - failed, failed_chunks=failed,
+                    candidates=len(found.get("candidates", [])))
         return jsonify(data)
 
     @app.post("/api/jobs/<job_id>/terms")
@@ -786,16 +807,32 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
                     if not isinstance(m, dict) or not isinstance(m.get("keys"), list):
                         raise term_review.ReviewError("合并数据的格式不正确")
                     term_review.merge(review, str(m.get("into")), [str(k) for k in m["keys"]])
+                libraries = {}
                 for item in save_to:
                     if not isinstance(item, dict):
                         raise term_review.ReviewError("保存数据的格式不正确")
-                    gid = check_glossaries([item.get("glossary")])[0]
-                    term_review.save_to_library(review.find(str(item.get("key"))), gid, job.state.target_lang)
+                    gid, key = item.get("glossary"), item.get("key")
+                    if not isinstance(gid, str) or not isinstance(key, str):
+                        raise term_review.ReviewError("保存数据的格式不正确")
+                    if gid not in libraries:
+                        libraries[gid] = glossary_store.load(gid)
+                    entity = review.find(key)
+                    term_review.add_to_library(entity, libraries[gid], job.state.target_lang)
+                    if gid not in entity.saved_to:
+                        entity.saved_to.append(gid)
+                if action == "continue":
+                    review.finished = True
+                if libraries:
+                    glossary_store.save_many(libraries.values(), lambda: term_review.save_review(job.dir, review))
+                else:
+                    term_review.save_review(job.dir, review)
+            except glossary_store.GlossaryConflict as exc:
+                return jsonify(error=str(exc)), 409
             except (term_review.ReviewError, ValueError) as exc:
                 return bad_request(str(exc))
-            if action == "continue":
-                review.finished = True
-            term_review.save_review(job.dir, review)
+            except OSError:
+                log.exception("无法保存任务 %s 的术语审核", job_id)
+                return jsonify(error="无法写入审核结果，请重试"), 500
             if action == "continue":
                 job.migrate()
                 runner.submit(job, reservation, from_stage="translate" if "translate" in job.state.completed else None)

@@ -40,7 +40,7 @@ def segments_from_list(items: list[dict[str, Any]]) -> list[Segment]:
 STAGES = ["download", "extract", "vad", "transcribe", "merge", "repair", "segment", "term_scan", "term_review",
           "translate", "write", "burn"]
 # 阶段或产物格式变化时加一。旧任务载入时按 pipeline.MIGRATIONS 迁移，没有对应迁移规则时从头重跑
-PIPELINE_VERSION = 4
+PIPELINE_VERSION = 5
 
 
 @dataclass

@@ -145,8 +145,28 @@
     const [target, ...rest] = cards;
     const aliasInput = target.querySelector('[data-entry="aliases"]');
     const canonical = target.querySelector('[data-entry="canonical"]').value.trim();
+    const category = (card) => card.querySelector('[data-entry="category"]');
+    const translations = new Map();
+    const conflicts = new Set();
+    for (const card of cards) {
+      for (const row of card.querySelectorAll(".translation-row")) {
+        const lang = row.querySelector("[data-lang]").value;
+        const text = row.querySelector("[data-text]").value.trim();
+        if (translations.has(lang)) {
+          if (translations.get(lang) !== text) conflicts.add(lang);
+        } else {
+          translations.set(lang, text);
+        }
+      }
+    }
+    if (conflicts.size && !window.confirm(`这些语言有不同的译名（${[...conflicts].join("、")}）。保留最靠前条目的译名并合并？`)) return;
+    const current = new Set([...target.querySelectorAll("[data-lang]")].map((select) => select.value));
+    for (const [lang, text] of translations) {
+      if (!current.has(lang)) addTranslation(target, lang, text);
+    }
     const aliases = splitAliases(aliasInput.value);
     for (const card of rest) {
+      if (!category(target).value) category(target).value = category(card).value;
       aliases.push(card.querySelector('[data-entry="canonical"]').value.trim(), ...splitAliases(card.querySelector('[data-entry="aliases"]').value));
       card.remove();
     }
@@ -271,7 +291,8 @@
       const res = await fetch(current ? `/api/glossaries/${encodeURIComponent(current)}` : "/api/glossaries", {
         method: current ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, notes: notesInput.value, entries: items }),
+        body: JSON.stringify({ name, notes: notesInput.value, entries: items,
+          revision: glossaries.find((g) => g.id === current)?.revision }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -290,7 +311,10 @@
   deleteBtn.addEventListener("click", async () => {
     if (!current || !window.confirm("确定删除这份背景资料吗？已经选用它的任务重新翻译时需要另选。")) return;
     try {
-      const res = await fetch(`/api/glossaries/${encodeURIComponent(current)}`, { method: "DELETE" });
+      const revision = glossaries.find((g) => g.id === current)?.revision;
+      const res = await fetch(`/api/glossaries/${encodeURIComponent(current)}`, {
+        method: "DELETE", headers: revision ? { "If-Match": `"${revision}"` } : {},
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       glossaries = glossaries.filter((g) => g.id !== current);
       current = null;

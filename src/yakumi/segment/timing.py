@@ -16,12 +16,13 @@ def place_sentences(sentences: list[str], core: tuple[float, float],
     if not sentences or n_chars == 0 or total <= 0:
         return []
 
-    def at(offset: float) -> float:
+    def at(offset: float, *, opening: bool) -> float:
         """语音时间轴上的偏移 → 绝对时间。"""
         for s, e in regions:
-            if offset <= e - s:
-                return s + offset
-            offset -= e - s
+            length = e - s
+            if offset < length - 1e-9 or not opening and offset <= length + 1e-9:
+                return s + min(offset, length)
+            offset = max(0.0, offset - length)
         return regions[-1][1]
 
     segments = []
@@ -30,5 +31,5 @@ def place_sentences(sentences: list[str], core: tuple[float, float],
         a = total * done / n_chars
         done += len(sentence)
         b = total * done / n_chars
-        segments.append(Segment(round(at(a), 3), round(at(b), 3), sentence))
+        segments.append(Segment(round(at(a, opening=True), 3), round(at(b, opening=False), 3), sentence))
     return segments

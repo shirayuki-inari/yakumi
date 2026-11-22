@@ -124,6 +124,8 @@ DEFAULTS: dict[str, Any] = {
         "ytdlp": "",  # yt-dlp 程序路径；留空时自动查找（Python 模块或 PATH 里的 yt-dlp）
         "extra_args": [],  # 额外传给 yt-dlp 的参数，例如 ["--cookies", "~/cookies.txt"]
         "allow_private": False,  # 是否允许下载局域网、本机地址的链接
+        "max_duration_seconds": 3600,  # 单个链接任务的总下载时限
+        "max_size_mb": 4096,  # 当前任务的下载文件与部分文件总量上限
     },
     "workspace": {
         "dir": ".yakumi",
@@ -214,7 +216,8 @@ def _service_origins(cfg: dict[str, Any]) -> dict[str, tuple[str, str, int] | No
     }
 
 
-def _merge_config(cfg: dict[str, Any], layer: dict[str, Any]) -> None:
+def merge_config_layer(cfg: dict[str, Any], layer: dict[str, Any]) -> None:
+    """叠加一层配置。服务来源变化时清除上一层的对应密钥。"""
     previous = _service_origins(cfg)
     _deep_merge(cfg, layer)
     for section, origin in _service_origins(cfg).items():
@@ -282,7 +285,7 @@ def build_config(layers: list[dict[str, Any]], overrides: dict[str, Any] | None 
     """按优先级合并：默认值 → 各配置文件的内容（按顺序）→ 环境变量 → 命令行参数。"""
     cfg = copy.deepcopy(DEFAULTS)
     for data in layers:
-        _merge_config(cfg, data)
+        merge_config_layer(cfg, data)
 
     if use_env:
         env_config: dict[str, dict[str, str]] = {}
@@ -290,12 +293,12 @@ def build_config(layers: list[dict[str, Any]], overrides: dict[str, Any] | None 
             value = os.environ.get(env)
             if value:
                 env_config.setdefault(section, {})[key] = value
-        _merge_config(cfg, env_config)
+        merge_config_layer(cfg, env_config)
 
     override_config = {}
     if overrides:
         override_config = {k: {kk: vv for kk, vv in v.items() if vv is not None} for k, v in overrides.items()}
-        _merge_config(cfg, override_config)
+        merge_config_layer(cfg, override_config)
     if use_env:
         for section in ("asr", "translate"):
             origin = service_origin(cfg[section]["base_url"])
