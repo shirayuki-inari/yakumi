@@ -1,4 +1,4 @@
-"""文件与目录：用户配置和缓存目录（遵循 XDG 约定）、JSON 的原子读写。"""
+"""文件与目录：用户配置、数据和缓存目录（遵循 XDG 约定）、JSON 的原子读写。"""
 
 from __future__ import annotations
 
@@ -14,6 +14,12 @@ from typing import Any, Iterator
 def config_dir() -> Path:
     """~/.config/yakumi（或 $XDG_CONFIG_HOME/yakumi）：配置文件、背景资料。"""
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "yakumi"
+
+
+def data_dir() -> Path:
+    """~/.local/share/yakumi（或 $XDG_DATA_HOME/yakumi）：默认的任务目录。"""
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
     return Path(base) / "yakumi"
 
 

@@ -280,7 +280,7 @@ yakumi serve --host 0.0.0.0     # 对其他设备开放；没有设置密码时�
 
 设计细节和实测数据见 [`docs/design/long-audio.md`](docs/design/long-audio.md)；断句与整句翻译见 [`docs/design/llm-segmentation.md`](docs/design/llm-segmentation.md)。
 
-任务目录（默认 `./.yakumi/jobs/<任务 ID>/`）：
+任务目录（默认 `~/.local/share/yakumi/jobs/<任务 ID>/`，设置了 `$XDG_DATA_HOME` 时在它下面；可用 `[workspace] dir` 或环境变量 `YAKUMI_WORKSPACE` 修改，配置文件里的相对路径相对于该文件所在的目录）。在哪个目录运行 yakumi 都使用同一个任务目录，`yakumi doctor` 会显示实际位置：
 
 ```
 vad.json  windows.json  pieces/  merged.json  repair.json  words.json

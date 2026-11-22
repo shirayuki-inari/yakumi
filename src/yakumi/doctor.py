@@ -48,6 +48,7 @@ def local_checks(cfg: dict[str, Any], config_path: str | Path | None = None) -> 
     found = config_files(config_path)
     checks.append(Check(INFO, f"配置文件：{', '.join(map(str, found)) if found else '未找到，使用默认值和环境变量'}",
                         group=env))
+    checks.append(Check(INFO, f"任务目录：{cfg['workspace']['dir']}", group=env))
 
     from .chunking.vad import SILERO_VERSION, model_cache_dir, silero_available
 

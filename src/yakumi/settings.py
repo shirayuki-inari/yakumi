@@ -23,8 +23,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import (DEFAULTS, ENV_MAP, LLM_SECTIONS, SERVICE_KEYS, ConfigError, build_config, config_files,
-                     inherited_llm_config, merge_config_layer, read_config_file, service_origin, user_config_path)
+from .config import (DEFAULTS, ENV_MAP, LLM_SECTIONS, SERVICE_KEYS, ConfigError, anchor_paths, build_config,
+                     config_files, inherited_llm_config, merge_config_layer, read_config_file, service_origin,
+                     user_config_path)
 
 REMOVE = object()
 
@@ -408,12 +409,12 @@ def save(config_path: str | Path | None, changes: dict[str, Any], *,
     old_text = target.read_text(encoding="utf-8") if target.is_file() else ""
     old_data = tomllib.loads(old_text) if old_text else {}
     others = [data for path, data in layers if path != target]
-    before = build_config([*others, old_data])
+    before = build_config([*others, anchor_paths(old_data, target.parent)])
     result = SaveResult(target)
 
     # 服务地址换了来源而没有同时填写新密钥时，删除这一段原来的密钥
     after_data = _apply(old_data, updates)
-    after = build_config([*others, after_data])
+    after = build_config([*others, anchor_paths(after_data, target.parent)])
     for section in SERVICE_SECTIONS:
         key_id = f"{section}.api_key"
         if key_id in updates:
@@ -425,7 +426,7 @@ def save(config_path: str | Path | None, changes: dict[str, Any], *,
             result.notices.append(f"{title}的服务地址变了，已删除原来的密钥，请为新服务填写密钥")
     after_data = _apply(old_data, updates)
     try:
-        after = build_config([*others, after_data])
+        after = build_config([*others, anchor_paths(after_data, target.parent)])
     except (ConfigError, ValueError, TypeError) as exc:
         raise SettingsError(str(exc)) from exc
     _check_combined(after)

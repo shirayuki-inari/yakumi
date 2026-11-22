@@ -423,14 +423,14 @@ def test_cli_run_pauses_and_resumes(make_video, tmp_path, monkeypatch):
     res = runner.invoke(main, args)
     assert res.exit_code == 0, res.output
     assert "yakumi terms review" in res.output and not (tmp_path / "sample.zh.srt").exists()
-    [state] = Job.list(tmp_path / ".yakumi")
+    [state] = Job.list(tmp_path / "data" / "yakumi")
     assert state.status == "awaiting_review"
     assert runner.invoke(main, ["terms", "set", state.id, "1", "--approve", "--translation", "一"]).exit_code == 0
     assert runner.invoke(main, ["terms", "done", state.id]).exit_code == 0
     res = runner.invoke(main, args)
     assert res.exit_code == 0, res.output
     assert (tmp_path / "sample.zh.srt").is_file()
-    job = Job.load(tmp_path / ".yakumi", state.id)
+    job = Job.load(tmp_path / "data" / "yakumi", state.id)
     assert job.state.status == "done" and job.state.stats["asr_requests"] == 1
     # 改了审核结果，再次执行时只重新翻译
     assert runner.invoke(main, ["terms", "set", state.id, "1", "--translation", "壹"]).exit_code == 0
@@ -539,5 +539,5 @@ def test_cli_auto_mode_does_not_retranslate_on_rerun(make_video, tmp_path, monke
     gs.save(library)
     res = runner.invoke(main, args + ["--notes", "更新背景"])
     assert res.exit_code == 0 and "从「术语扫描」重新处理" in res.output
-    job_path = next((tmp_path / ".yakumi" / "jobs").iterdir())
+    job_path = next((tmp_path / "data" / "yakumi" / "jobs").iterdir())
     assert "新的固定译名" in (job_path / "glossary.json").read_text(encoding="utf-8")

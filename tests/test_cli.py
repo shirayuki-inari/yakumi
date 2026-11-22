@@ -39,7 +39,7 @@ def test_run_then_reuse_and_reexport(cli, sample_video, tmp_path):
     res = cli("run", str(sample_video), "-t", "zh", "--asr", "fake", "--translator", "fake", "-o", str(out),
               "--format", "vtt")
     assert "沿用任务" in res.output and (out / "sample.zh.vtt").is_file()
-    states = Job.list(tmp_path / ".yakumi")
+    states = Job.list(tmp_path / "data" / "yakumi")
     assert len(states) == 1 and states[0].format == "vtt"
 
 
@@ -51,7 +51,7 @@ def test_cli_cache_compares_media_and_effective_stage_inputs(cli, make_video, tm
     cli("glossary", "set", "terms", "w0", "first")
     first = cli(*args, "-g", "terms")
     assert first.exit_code == 0, first.output
-    workspace = tmp_path / ".yakumi"
+    workspace = tmp_path / "data" / "yakumi"
     [initial] = Job.list(workspace)
     assert initial.stage_inputs and initial.stats["asr_requests"] == 1
 
@@ -79,7 +79,7 @@ def test_cli_cache_compares_media_and_effective_stage_inputs(cli, make_video, tm
 
 
 def test_legacy_task_is_preserved_and_its_context_is_reused(cli, sample_video, tmp_path):
-    workspace = tmp_path / ".yakumi"
+    workspace = tmp_path / "data" / "yakumi"
     cli("glossary", "set", "terms", "w0", "hint")
     old = Job.create(workspace, sample_video, "zh", glossaries=["terms"], notes="existing context")
     old.subtitle_path.write_text("old subtitle", encoding="utf-8")
@@ -133,9 +133,43 @@ def test_unknown_keys_and_config_error(tmp_path):
         load_config(bad)
 
 
-def test_doctor_offline(cli):
+def test_workspace_does_not_depend_on_current_directory(cli, sample_video, tmp_path, monkeypatch):
+    """在不同目录运行，任务都在同一个任务目录里，能沿用之前的任务。"""
+    args = ("run", str(sample_video), "-t", "zh", "--asr", "fake", "--translator", "fake",
+            "-o", str(tmp_path / "out"))
+    assert cli(*args).exit_code == 0
+    elsewhere = tmp_path / "desktop"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    again = cli(*args)
+    assert again.exit_code == 0 and "沿用任务" in again.output
+    assert len(Job.list(tmp_path / "data" / "yakumi")) == 1
+    assert not (tmp_path / ".yakumi").exists() and not (elsewhere / ".yakumi").exists()
+
+
+def test_workspace_paths_resolve_to_absolute(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert load_config(tmp_path / "none.toml", use_env=False)["workspace"]["dir"] == \
+        str((tmp_path / "data" / "yakumi").resolve())
+    # 配置文件里的相对路径相对于配置文件所在的目录，而不是当前目录
+    project = tmp_path / "project"
+    (project / "sub").mkdir(parents=True)
+    conf = project / "yakumi.toml"
+    conf.write_text('[workspace]\ndir = "tasks"\n', encoding="utf-8")
+    monkeypatch.chdir(project / "sub")
+    assert load_config(conf)["workspace"]["dir"] == str((project / "tasks").resolve())
+    conf.write_text('[workspace]\ndir = "~/tasks"\n', encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert load_config(conf)["workspace"]["dir"] == str((tmp_path / "home" / "tasks").resolve())
+    # 环境变量里的相对路径相对于当前目录
+    monkeypatch.setenv("YAKUMI_WORKSPACE", "env-tasks")
+    assert load_config(conf)["workspace"]["dir"] == str((project / "sub" / "env-tasks").resolve())
+
+
+def test_doctor_offline(cli, tmp_path):
     res = cli("doctor")
     assert "ffmpeg" in res.output and "断句" in res.output
+    assert f"任务目录：{(tmp_path / 'data' / 'yakumi').resolve()}" in res.output
 
 
 def test_python_m_entry_point():
@@ -218,13 +252,13 @@ def test_runtime_only_settings_keep_finished_stages(cli, sample_video, tmp_path)
     base = '[chunking]\nvad = "energy"\n'
     args = ("run", str(sample_video), "-t", "zh", "--asr", "fake", "--translator", "fake")
     assert cli(*args).exit_code == 0
-    [job] = Job.list(tmp_path / ".yakumi")
+    [job] = Job.list(tmp_path / "data" / "yakumi")
 
     conf.write_text(base + "[asr]\nthreads = 1\n[translate]\ntimeout = 999\n"
                     "[segment]\ntimeout = 5\nconcurrency = 1\n", encoding="utf-8")
     again = cli(*args)
     assert again.exit_code == 0 and "重新处理" not in again.output
-    [same] = Job.list(tmp_path / ".yakumi")
+    [same] = Job.list(tmp_path / "data" / "yakumi")
     assert same.id == job.id and same.stats == job.stats
 
     # 会改变结果的设置仍然触发重做

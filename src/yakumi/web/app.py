@@ -33,7 +33,7 @@ from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .. import download as downloader, glossary as glossary_store, media, settings as settings_store
-from ..config import ConfigError, load_config
+from ..config import ConfigError, load_config, workspace_dir
 from ..doctor import local_checks, online_checks, setup_problems
 from ..files import read_json, write_json
 from ..models import STAGES, JobState, Segment
@@ -202,7 +202,7 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
     """`cfg` 由调用方直接提供时（测试、嵌入使用），网页保存的设置会写入配置文件并叠加到它上面。"""
     injected = cfg is not None
     cfg = cfg or load_config(config_path)
-    workspace = Path(cfg["workspace"]["dir"]).resolve()
+    workspace = Path(workspace_dir(cfg["workspace"]["dir"]))  # 调用方直接提供的 cfg 也可能是相对路径
     cfg["workspace"]["dir"] = str(workspace)
     (workspace / "uploads").mkdir(parents=True, exist_ok=True)
 

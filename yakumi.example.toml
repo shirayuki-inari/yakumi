@@ -142,5 +142,6 @@ max_duration_seconds = 3600  # 单个链接的下载时限（秒）
 max_size_mb = 4096            # 任务的下载文件与部分文件总量上限（MB）
 
 [workspace]
-dir = ".yakumi"          # 任务目录（相对于运行命令时的当前目录）
+dir = ""                 # 任务目录；留空时为 ~/.local/share/yakumi（或 $XDG_DATA_HOME/yakumi）。
+                         # 相对路径相对于这个配置文件所在的目录，不随运行命令时的当前目录变化
 keep_audio = false       # 任务完成后是否保留抽出的 audio.wav（约 115MB/小时）

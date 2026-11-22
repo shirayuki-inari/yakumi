@@ -3,6 +3,10 @@
 优先级（后者覆盖前者）：内置默认值 → ~/.config/yakumi/config.toml →
 当前目录 ./yakumi.toml → 环境变量 → 命令行参数。
 用 -c 指定配置文件时，只读取这一个文件，代替全局配置和项目配置。
+
+任务目录 [workspace] dir 总是解析成绝对路径，不随运行命令时的当前目录变化：
+留空时使用 ~/.local/share/yakumi（或 $XDG_DATA_HOME/yakumi）；配置文件里的相对路径
+相对于该配置文件所在的目录；环境变量里的相对路径相对于当前目录。
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from .files import config_dir
+from .files import config_dir, data_dir
 
 DEFAULTS: dict[str, Any] = {
     "asr": {
@@ -128,7 +132,7 @@ DEFAULTS: dict[str, Any] = {
         "max_size_mb": 4096,  # 当前任务的下载文件与部分文件总量上限
     },
     "workspace": {
-        "dir": ".yakumi",
+        "dir": "",  # 留空时为 ~/.local/share/yakumi
         "keep_audio": False,  # 任务完成后是否保留抽出的 audio.wav（约 115MB/小时）
     },
 }
@@ -249,12 +253,31 @@ def unknown_keys(data: dict[str, Any], defaults: dict[str, Any] = DEFAULTS, pref
     return found
 
 
+def anchor_paths(data: dict[str, Any], base: Path) -> dict[str, Any]:
+    """配置文件里任务目录的相对路径改为相对于 base（该配置文件所在的目录）。返回新的字典。"""
+    value = data.get("workspace", {}).get("dir") if isinstance(data.get("workspace"), dict) else None
+    if not isinstance(value, str) or not value:
+        return data
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return data
+    return {**data, "workspace": {**data["workspace"], "dir": str(base.absolute() / path)}}
+
+
+def workspace_dir(value: Any) -> str:
+    """任务目录的绝对路径：留空时用数据目录，相对路径相对于当前目录。"""
+    text = str(value or "").strip()
+    return str((Path(text).expanduser() if text else data_dir()).resolve())
+
+
 def read_config_file(path: Path) -> dict[str, Any]:
+    """读取配置文件。其中的相对路径（任务目录）按配置文件所在的目录展开。"""
     try:
         with open(path, "rb") as f:
-            return tomllib.load(f)
+            data = tomllib.load(f)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"配置文件 {path} 格式有误：{exc}") from exc
+    return anchor_paths(data, path.parent)
 
 
 def config_files(path: str | Path | None = None) -> list[Path]:
@@ -305,4 +328,5 @@ def build_config(layers: list[dict[str, Any]], overrides: dict[str, Any] | None 
             env = SERVICE_KEYS.get(origin) if origin is not None else None
             if env and not cfg[section].get("api_key") and "api_key" not in override_config.get(section, {}):
                 cfg[section]["api_key"] = os.environ.get(env, "")
+    cfg["workspace"]["dir"] = workspace_dir(cfg["workspace"].get("dir"))
     return cfg

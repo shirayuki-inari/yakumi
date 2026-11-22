@@ -65,6 +65,16 @@ def test_project_config_is_written_when_present(tmp_path):
     assert not user_config_path().exists()
 
 
+def test_relative_workspace_in_project_config_is_relative_to_that_file(tmp_path):
+    conf = tmp_path / "yakumi.toml"
+    conf.write_text('[workspace]\ndir = "tasks"\n', encoding="utf-8")
+    result = settings.save(None, {"translate.model": "q"})
+    assert result.cfg["workspace"]["dir"] == str((tmp_path / "tasks").resolve())
+    assert 'dir = "tasks"' in conf.read_text(encoding="utf-8")  # 保存其他设置时原样保留
+    readonly = {item["id"]: item["value"] for item in settings.describe()["readonly"]}
+    assert readonly["workspace.dir"] == str((tmp_path / "tasks").resolve())
+
+
 def test_changing_service_drops_old_key():
     settings.save(None, {"translate.api_key": "sk-or-old", "segment.api_key": "sk-seg"})
     result = settings.save(None, {"translate.base_url": "http://127.0.0.1:11434/v1"})

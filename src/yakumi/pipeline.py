@@ -1,7 +1,7 @@
 """任务流水线：（download →）extract → vad → transcribe → merge → repair → segment →（term_scan → term_review →）
 translate → write → burn。
 
-每个任务对应一个目录（默认 .yakumi/jobs/<id>/），各阶段的产物都落盘：
+每个任务对应一个目录（默认 ~/.local/share/yakumi/jobs/<id>/），各阶段的产物都落盘：
 
     download.<ext>   视频链接任务下载的视频（需要 yt-dlp）
     audio.wav        抽出的音频（16kHz 单声道 16 位），VAD、切片与复核都从这里读取

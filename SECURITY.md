@@ -21,7 +21,7 @@
 
 - API 密钥可以放在环境变量（`OPENROUTER_API_KEY` 等）或配置文件里。全局配置 `~/.config/yakumi/config.toml` 建议设置为只有自己可读（`chmod 600`）。
 - 项目级配置 `yakumi.toml` 已在 `.gitignore` 中排除，请不要把密钥提交到仓库。
-- 任务目录（`.yakumi/`）里不保存密钥，但包含视频、识别文本和译文，分享前请留意内容。
+- 任务目录（默认 `~/.local/share/yakumi/`）里不保存密钥，但包含视频、识别文本和译文，分享前请留意内容。
 
 ## 外部服务
 

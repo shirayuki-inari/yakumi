@@ -10,8 +10,11 @@ needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="需要 ffm
 
 @pytest.fixture(autouse=True)
 def isolated_cache(tmp_path, monkeypatch):
-    """测试不读写真实的 ~/.cache/yakumi（能力探测缓存等）和 ~/.config/yakumi（背景资料等）。"""
+    """测试不读写真实的 ~/.cache/yakumi（能力探测缓存等）、~/.config/yakumi（背景资料等）
+    和 ~/.local/share/yakumi（默认任务目录）。"""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.delenv("YAKUMI_WORKSPACE", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.delenv("YAKUMI_WEB_PASSWORD", raising=False)
 
