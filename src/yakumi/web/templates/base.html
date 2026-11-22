@@ -33,7 +33,8 @@
           <span>Yakumi</span>
         </a>
         <div class="header-actions">
-          <a class="help-button" href="{{ url_for('glossaries_page') }}">{{ icon("book-open", 16) }}<span>术语表</span></a>
+          <a class="help-button" href="{{ url_for('glossaries_page') }}"{% if request.endpoint == 'glossaries_page' %} aria-current="page"{% endif %}>{{ icon("book-open", 16) }}<span>术语表</span></a>
+          <a class="help-button" href="{{ url_for('settings_page') }}"{% if request.endpoint == 'settings_page' %} aria-current="page"{% endif %}>{{ icon("settings", 16) }}<span>设置</span></a>
           <button type="button" class="help-button" data-open-help>
             {{ icon("circle-help", 16) }}<span>使用说明</span>
           </button>
@@ -60,13 +61,13 @@
         <button type="button" class="icon-button close-modal" aria-label="关闭" data-close-help>{{ icon("x", 18) }}</button>
         <h2 id="help-title">使用说明</h2>
         <ol>
-          <li><strong>上传视频</strong><p>选择视频文件和目标语言。原语言默认自动识别，也可以手动指定。</p></li>
+          <li><strong>上传视频</strong><p>选择视频文件和目标语言。原语言默认自动识别，也可以手动指定；“翻译成”选择“不翻译”时只识别原文。已经有字幕时切换到“已有字幕”，上传 SRT / VTT 直接翻译，也可以附带视频用于预览和烧录。</p></li>
           <li><strong>等待处理</strong><p>依次进行语音识别、断句、翻译。可以关闭页面，任务会在后台继续。</p></li>
           <li><strong>校对字幕</strong><p>在任务页逐条修改原文和译文，点击视频下方的字幕行可以跳到对应位置。</p></li>
           <li><strong>导出</strong><p>选择单语或双语、字幕格式，以及是否把字幕烧录进视频，然后下载。</p></li>
           <li><strong>术语表</strong><p>把人名、专有名词的固定译法和节目背景保存成术语表，上传时选用，可以在多个视频里复用。</p></li>
         </ol>
-        <p class="notice">识别和翻译的服务地址、模型和密钥在配置文件里设置，运行 <code>yakumi doctor</code> 可以检查配置。</p>
+        <p class="notice">识别和翻译的服务地址、模型和密钥在 <a href="{{ url_for('settings_page') }}">设置</a> 中修改，那里也可以检查运行环境和测试连接。</p>
       </div>
     </div>
 

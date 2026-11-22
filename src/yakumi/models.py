@@ -70,6 +70,8 @@ class JobState:
     pipeline_version: int = 1
     stage_inputs: dict[str, str] | None = None
     revision: int = 0
+    # media：从视频或音频识别；subtitles：导入已有字幕（跳过识别和断句，可以没有视频，此时 video 为空）
+    source_type: str = "media"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

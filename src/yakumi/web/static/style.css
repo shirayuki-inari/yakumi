@@ -1317,3 +1317,471 @@ textarea::placeholder {
     transition: none !important;
   }
 }
+
+/* ---- 导航：当前页面 ---- */
+.help-button[aria-current="page"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* ---- 首页：任务类型、可选视频、未完成设置的提醒 ---- */
+.mode-switch {
+  grid-column: 1 / -1;
+  justify-self: start;
+  width: 100%;
+  max-width: 300px;
+}
+.mode-switch button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.optional-video {
+  grid-column: 1 / -1;
+}
+.file-field.compact {
+  height: 40px;
+}
+.file-field.compact .file-name {
+  font-size: 13px;
+}
+.inline-toggle.disabled {
+  opacity: 0.45;
+}
+.toggle:disabled {
+  cursor: not-allowed;
+}
+.setup-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--danger-line);
+  border-radius: 16px;
+  background: var(--danger);
+  color: var(--danger-ink);
+}
+.setup-banner > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.setup-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.setup-text ul {
+  margin: 2px 0 0;
+  padding-left: 18px;
+}
+.setup-banner .secondary-button {
+  flex-shrink: 0;
+  background: var(--panel);
+}
+
+/* ---- 任务页：步骤条、无视频、任务操作 ---- */
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+.step {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.step::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid var(--toggle-off);
+}
+.step.done {
+  color: var(--ink-2);
+}
+.step.done::before {
+  border-color: var(--success-ink);
+  background: var(--success-ink);
+}
+.step.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+.step.active::before {
+  border-color: var(--accent);
+  background: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.step.error {
+  color: var(--danger-ink);
+  font-weight: 600;
+}
+.step.error::before {
+  border-color: var(--danger-ink);
+  background: var(--danger-ink);
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+.actions-panel {
+  margin-top: 16px;
+}
+.actions-panel .secondary-button + .field-hint {
+  margin-bottom: 16px;
+}
+.actions-panel .field-hint:last-child {
+  margin-bottom: 0;
+}
+.no-video {
+  min-height: 160px;
+  background: var(--panel);
+}
+
+/* ---- 设置页 ---- */
+.settings-layout {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+.settings-nav {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-nav a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 10px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.settings-nav a:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.settings-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-bottom: 72px;
+}
+[data-groups] {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.settings-group {
+  scroll-margin-top: 16px;
+}
+.settings-group .panel-heading {
+  margin-bottom: 4px;
+}
+.group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.group-title svg {
+  color: var(--ink-3);
+}
+.group-desc {
+  margin-bottom: 8px;
+}
+.heading-actions {
+  display: flex;
+  gap: 14px;
+}
+.setting-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 260px);
+  gap: 4px 20px;
+  align-items: start;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+.setting-rows .setting-row:first-child {
+  border-top: 0;
+}
+.setting-text {
+  min-width: 0;
+  padding-top: 2px;
+}
+.setting-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin-bottom: 2px;
+}
+.setting-label {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 500;
+}
+.setting-row.changed .setting-label::after {
+  content: " ·";
+  color: var(--accent);
+}
+.source-badge {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+.source-badge.default {
+  background: var(--hover);
+  color: var(--ink-3);
+}
+.setting-control {
+  min-width: 0;
+  display: flex;
+  justify-content: flex-end;
+}
+.setting-control > * {
+  width: 100%;
+}
+.setting-control > .toggle {
+  width: 36px;
+  margin-top: 4px;
+}
+.setting-control.wide {
+  grid-column: 1 / -1;
+}
+.setting-control .text-input,
+.setting-control .select-wrap {
+  height: 40px;
+}
+.select-wrap.plain select {
+  padding-left: 12px;
+}
+.setting-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.setting-note:empty {
+  display: none;
+}
+.inline-link {
+  color: var(--accent);
+  font-size: 12px;
+}
+.secret-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.secret-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.secret-status.set {
+  color: var(--success-ink);
+}
+.file-info,
+.readonly-list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 16px;
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+.file-info dt,
+.readonly-list dt {
+  color: var(--ink-2);
+}
+.file-info dd,
+.readonly-list dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.readonly-list {
+  margin-top: 12px;
+}
+
+/* 环境检查 */
+.check-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.check-group {
+  margin: 12px 0 4px;
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 600;
+}
+.check-list .check-group:first-child {
+  margin-top: 4px;
+}
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 5px 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.check > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.check.ok > svg {
+  color: var(--success-ink);
+}
+.check.warn > svg {
+  color: #b7791f;
+}
+.check.fail > svg {
+  color: var(--danger-ink);
+}
+.check.info > svg {
+  color: var(--ink-3);
+}
+.check.loading {
+  color: var(--ink-3);
+}
+.check-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.check-title {
+  overflow-wrap: anywhere;
+}
+.check-detail,
+.check-hint {
+  color: var(--ink-3);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.check.fail .check-hint {
+  color: var(--danger-ink);
+}
+
+/* 底部的保存条 */
+.save-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  z-index: 60;
+  transform: translateX(-50%);
+  width: min(640px, calc(100% - 32px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 10px 10px 18px;
+  border-radius: 16px;
+  background: var(--panel);
+  box-shadow: var(--shadow-raised);
+  font-size: 13px;
+}
+.save-bar.success {
+  color: var(--success-ink);
+}
+.save-bar.error {
+  color: var(--danger-ink);
+}
+.save-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.save-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+.save-actions .primary {
+  height: 40px;
+  padding: 0 16px;
+}
+
+@media (max-width: 820px) {
+  .settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .settings-nav {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 4px;
+    margin: -4px 0 0;
+    scrollbar-width: none;
+  }
+  .settings-nav a {
+    flex-shrink: 0;
+    background: var(--panel);
+    box-shadow: var(--shadow);
+  }
+}
+@media (max-width: 560px) {
+  .mode-switch {
+    max-width: none;
+  }
+  .setup-banner {
+    flex-wrap: wrap;
+  }
+  .setup-banner .secondary-button {
+    width: 100%;
+  }
+  .upload-options {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+  .setting-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .setting-control {
+    justify-content: flex-start;
+  }
+  .heading-actions {
+    gap: 10px;
+  }
+  .save-bar {
+    bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .save-actions {
+    width: 100%;
+  }
+  .save-actions > * {
+    flex: 1;
+  }
+}
+.notice a {
+  color: inherit;
+  text-decoration: underline;
+}

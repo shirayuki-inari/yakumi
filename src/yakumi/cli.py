@@ -14,7 +14,7 @@ import click
 
 from . import __version__, media
 from . import glossary as glossary_store
-from .config import ConfigError, config_files, is_local_service, is_openrouter, load_config
+from .config import ConfigError, load_config
 from .models import STAGES, JobState
 from .pipeline import STAGE_LABELS, Job, PipelineError, record_translation_usage, run, translation_config
 from .segment import INHERITED, segment_llm_config
@@ -468,7 +468,8 @@ def jobs(ctx):
     if not states:
         click.echo("还没有任务。")
     for st in states[:20]:
-        click.echo(f"{st.id}  {st.status:<7} {st.target_lang or '-':<5} {Path(st.video).name}")
+        name = Path(st.video).name if st.video else "（导入的字幕）"
+        click.echo(f"{st.id}  {st.status:<7} {st.target_lang or '-':<5} {name}")
 
 
 @main.command()
@@ -476,138 +477,19 @@ def jobs(ctx):
 @click.pass_context
 def doctor(ctx, online: bool):
     """检查运行环境与配置。"""
+    from .doctor import local_checks, online_checks
+
     cfg = _cfg(ctx)
-    ok = True
-
-    def line(passed: bool, text: str, hint: str = "", warn: bool = False) -> None:
-        nonlocal ok
-        if not passed and not warn:
-            ok = False
-        mark = click.style("✓", fg="green") if passed else click.style("!" if warn else "✗",
-                                                                       fg="yellow" if warn else "red")
-        click.echo(f"{mark} {text}" + (f"\n    {hint}" if hint and not passed else ""))
-
-    line(bool(shutil.which("ffmpeg")), "ffmpeg", "请安装 ffmpeg（Termux：pkg install ffmpeg）")
-    line(bool(shutil.which("ffprobe")), "ffprobe")
-    line(media.ffmpeg_has_libass(), "ffmpeg 支持字幕烧录（libass）", "烧录字幕需要带 libass 的 ffmpeg")
-
-    found = config_files(ctx.obj.get("config"))
-    click.echo(f"• 配置文件：{', '.join(map(str, found)) if found else '未找到，使用默认值和环境变量'}")
-
-    # VAD
-    from .chunking.vad import SILERO_VERSION, model_cache_dir, silero_available
-
-    vad = cfg["chunking"].get("vad", "silero")
-    if vad == "silero":
-        if silero_available():
-            cached = (model_cache_dir() / f"silero_vad_{SILERO_VERSION}.onnx").is_file()
-            line(True, f"VAD：Silero {SILERO_VERSION}" + ("" if cached else "（模型将在首次使用时下载，约 2MB）"))
-        else:
-            line(False, "VAD：没有 onnxruntime，将改用能量检测（背景音乐较强时切点可能不准）",
-                 "Termux：pkg install python-onnxruntime；其他平台：pip install 'yakumi[vad]'", warn=True)
-    else:
-        click.echo(f"• VAD：{vad}")
-
-    asr = cfg["asr"]
-    click.echo(f"• 语音识别：{asr['provider']}")
-    if asr["provider"] == "whisper_cpp":
-        binary = Path(asr["whisper_cpp_bin"]).expanduser()
-        line(bool(shutil.which(str(binary)) or binary.is_file()), f"whisper.cpp 程序：{binary}")
-        model = Path(asr["whisper_cpp_model"]).expanduser() if asr["whisper_cpp_model"] else None
-        line(bool(model and model.is_file()), f"whisper.cpp 模型：{model or '(未配置)'}")
-    else:
-        click.echo(f"    {asr['base_url']}  模型 {asr['model']}")
-        click.echo(f"    窗口 {asr['target_window']} 秒（上限 {asr['max_window']} 秒），上传格式 {asr.get('upload_format', 'flac')}")
-        line(bool(asr.get("api_key")), "语音识别 API Key",
-             "设置 OPENROUTER_API_KEY（或 YAKUMI_ASR_API_KEY），或写入配置文件")
-        from .asr import create_asr
-        from .chunking.transcribe import capability_cache_path
-
-        cache = capability_cache_path()
-        key = create_asr(asr).cache_key  # type: ignore[attr-defined]  # 只有 OpenAI 兼容后端有探测缓存
-        if cache.is_file():
-            import json
-
-            entry = json.loads(cache.read_text(encoding="utf-8")).get(key)
-            if entry:
-                mode = {"words": "词级时间戳", "text": "纯文本"}.get(entry["mode"], entry["mode"])
-                click.echo(f"    识别能力：{mode}（{entry.get('checked_at', '')} 探测）")
-
-    tr = cfg["translate"]
-    click.echo(f"• 翻译：{tr['base_url']}  模型 {tr['model']}")
-    openrouter = is_openrouter(tr["base_url"])
-    unit = "整句翻译" if tr.get("unit", "sentence") == "sentence" else "逐条翻译"
-    click.echo(f"    {unit}，思考档位 {tr.get('reasoning_effort') or '模型默认'}，并发 {tr.get('concurrency', 1)}"
-               + (f"，路由 {tr.get('routing', 'default')}" if openrouter else ""))
-    local = is_local_service(tr["base_url"])
-    line(bool(tr.get("api_key")) or local, "翻译 API Key",
-         "设置 OPENROUTER_API_KEY（或 YAKUMI_TRANSLATE_API_KEY）；本地服务可以不填")
-
-    from .segment import segment_llm_config
-
-    sg = cfg.get("segment", {})
-    seg_cfg = segment_llm_config(cfg)
-    if sg.get("mode", "llm") == "llm":
-        click.echo(f"• 断句：LLM，模型 {seg_cfg['model']}，思考档位 {seg_cfg.get('reasoning_effort') or '模型默认'}")
-        seg_local = is_local_service(seg_cfg["base_url"])
-        line(bool(seg_cfg.get("api_key")) or seg_local, "断句可以调用模型",
-             "没有密钥，将改用规则断句（只按句末标点）", warn=True)
-    else:
-        click.echo("• 断句：规则（只按句末标点）")
-    click.echo(f"• 字幕标点：{'按字幕惯例（中日文句中逗号句号换成空格，行尾的去掉）' if cfg['subtitle'].get('punctuation', 'subtitle') == 'subtitle' else '原样保留'}")
-
+    checks = local_checks(cfg, ctx.obj.get("config"))
     if online:
-        import httpx
-
-        targets = [("翻译接口", tr["base_url"], tr.get("api_key"))]
-        if asr["provider"] == "openai":
-            targets.insert(0, ("语音识别接口", asr["base_url"], asr.get("api_key")))
-        for name, base, key in targets:
-            # OpenRouter 的 /key 能同时验证密钥；其他兼容服务用 /models
-            path = "/key" if is_openrouter(base) else "/models"
-            try:
-                resp = httpx.get(base.rstrip("/") + path, timeout=15,
-                                 headers={"Authorization": f"Bearer {key}"} if key else {})
-                line(resp.status_code < 400, f"{name}连通，密钥有效（HTTP {resp.status_code}）",
-                     resp.text[:200])
-            except httpx.HTTPError as exc:
-                line(False, f"{name}连通", str(exc))
-        if openrouter:
-            _check_openrouter_model(tr, line, "翻译", "translate.reasoning_effort")
-            if sg.get("mode", "llm") == "llm" and is_openrouter(seg_cfg["base_url"]):
-                _check_openrouter_model(seg_cfg, line, "断句", "segment.reasoning_effort")
-    sys.exit(0 if ok else 1)
-
-
-def _check_openrouter_model(tr: dict[str, Any], line, name: str = "翻译",
-                            effort_key: str = "translate.reasoning_effort") -> None:
-    """用 OpenRouter 的模型列表核对模型是否存在、思考档位是否受支持。"""
-    import httpx
-
-    base_model = tr["model"].split(":", 1)[0]
-    try:
-        resp = httpx.get(tr["base_url"].rstrip("/") + "/models", timeout=20)
-        models = {m["id"]: m for m in resp.json().get("data", [])}
-    except (httpx.HTTPError, ValueError) as exc:
-        line(False, "读取 OpenRouter 模型列表", str(exc), warn=True)
-        return
-    model = models.get(base_model)
-    if not model:
-        line(False, f"{name}模型 {base_model} 在 OpenRouter 上存在", "请检查模型名")
-        return
-    reasoning = model.get("reasoning") or {}
-    efforts = reasoning.get("supported_efforts") or []
-    effort = (tr.get("reasoning_effort") or "").lower()
-    desc = f"支持的思考档位 {', '.join(efforts) or '无'}" + ("（不能关闭）" if reasoning.get("mandatory") else "")
-    if not effort:
-        line(True, f"{name}模型存在，{desc}")
-    elif effort == "none":
-        line(not reasoning.get("mandatory"), f"{name}思考档位 none，{desc}",
-             "该模型不能关闭思考，请改为 " + " / ".join(efforts))
-    elif efforts:
-        line(effort in efforts, f"{name}思考档位 {effort}，{desc}", f"请把 {effort_key} 改为 " + " / ".join(efforts))
-    else:
-        line(False, f"{name}思考档位 {effort}，但该模型没有声明支持的档位", "可能会被忽略或报错", warn=True)
+        checks += online_checks(cfg)
+    marks = {"ok": click.style("✓", fg="green"), "warn": click.style("!", fg="yellow"),
+             "fail": click.style("✗", fg="red"), "info": "•"}
+    for check in checks:
+        click.echo(f"{marks[check.status]} {check.title}")
+        for line in check.detail + ([check.hint] if check.hint else []):
+            click.echo(f"    {line}")
+    sys.exit(1 if any(c.failed for c in checks) else 0)
 
 
 if __name__ == "__main__":

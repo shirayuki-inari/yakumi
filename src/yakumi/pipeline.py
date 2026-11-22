@@ -43,7 +43,7 @@ from .models import PIPELINE_VERSION, STAGES, JobState, Segment, segments_from_l
 from .segment import create_segmenter, segment_blocks, segment_words
 from .subtitle.formats import render
 from .translate import create_translator
-from .translate.grouped import translate_cues
+from .translate.grouped import group_by_punctuation, translate_cues
 
 ProgressFn = Callable[[JobState], None]
 
@@ -92,23 +92,26 @@ class Job:
 
     # ---- 持久化 -------------------------------------------------------
     @classmethod
-    def create(cls, workspace: str | Path, video: str | Path, target_lang: str | None,
+    def create(cls, workspace: str | Path, video: str | Path | None, target_lang: str | None,
                source_lang: str | None = None, bilingual: bool = False, burn: bool = False,
                fmt: str = "srt", move_video: bool = False, job_id: str | None = None,
                glossaries: list[str] | None = None, notes: str = "",
                stage_inputs: dict[str, str] | None = None) -> "Job":
-        """创建任务。`move_video` 为真时把视频移入任务目录（用于网页上传的临时文件）。"""
+        """创建任务。`move_video` 为真时把视频移入任务目录（用于网页上传的临时文件）。
+
+        `video` 为空时是没有视频的字幕任务，之后需要用 `import_subtitles` 导入字幕。
+        """
         root = Path(workspace) / "jobs"
         now = time.time()
         state = JobState(
-            id=job_id or new_job_id(), video=str(Path(video).resolve()), target_lang=target_lang or "",
+            id=job_id or new_job_id(), video=str(Path(video).resolve()) if video else "", target_lang=target_lang or "",
             source_lang=source_lang or None, bilingual=bilingual, burn=burn, format=fmt,
             created_at=now, updated_at=now, pipeline_version=PIPELINE_VERSION,
             glossaries=list(glossaries or []), notes=notes.strip(), stage_inputs=stage_inputs,
         )
         job = cls(root, state)
         job.dir.mkdir(parents=True, exist_ok=True)
-        if move_video:
+        if move_video and video:
             dest = job.dir / ("input" + Path(video).suffix.lower())
             shutil.move(str(video), dest)
             job.state.video = str(dest.resolve())
@@ -197,6 +200,15 @@ class Job:
         write_json(self.path(name), segments_to_list(segments))
         self.invalidate_from("write")
 
+    def import_subtitles(self, segments: list[Segment]) -> None:
+        """导入已有字幕：没有词级时间和句子信息，按句末标点把连续的字幕条并成句子，跳过识别和断句。"""
+        group_by_punctuation(segments)
+        write_json(self.path("aligned.json"), segments_to_list(segments))
+        self.state.source_type = "subtitles"
+        self.state.completed = STAGES[:STAGES.index("translate")]
+        self.state.stats = {"imported_cues": len(segments)}
+        self.save()
+
     def set_translation_context(self, glossaries: list[str], notes: str) -> bool:
         """更换术语表或补充信息。有变化时返回 True，并让翻译及之后的阶段重跑。"""
         glossaries, notes = list(glossaries), notes.strip()
@@ -226,20 +238,28 @@ class Job:
         self.save()
 
 
-def _enabled_stages(state: JobState) -> list[str]:
+def enabled_stages(state: JobState) -> list[str]:
+    """这个任务需要执行的阶段。导入的字幕跳过识别和断句；没有视频时不能烧录。"""
     stages = list(STAGES)
+    if state.source_type == "subtitles":
+        stages = stages[STAGES.index("translate"):]
     if not state.target_lang:
         stages.remove("translate")
-    if not state.burn:
+    if not state.burn or not state.video:
         stages.remove("burn")
     return stages
+
+
+def first_stage(state: JobState) -> str:
+    """“从头重新处理”时从哪个阶段开始。"""
+    return enabled_stages(state)[0]
 
 
 def run(job: Job, cfg: dict[str, Any], progress: ProgressFn | None = None, force: bool = False,
         from_stage: str | None = None) -> JobState:
     """执行（或续跑）任务。`from_stage` 指定从哪个阶段开始强制重跑。"""
     state = job.state
-    stages = _enabled_stages(state)
+    stages = enabled_stages(state)
     total = sum(WEIGHTS[s] for s in stages)
     done_weight = 0.0
 
@@ -255,7 +275,7 @@ def run(job: Job, cfg: dict[str, Any], progress: ProgressFn | None = None, force
     job.save()
     try:
         if force:
-            job.invalidate_from(STAGES[0])
+            job.invalidate_from(first_stage(state))
         elif from_stage:
             job.invalidate_from(from_stage)
         # audio.wav 在任务完成后会被删除；还有需要它的阶段没跑完时，重新抽取
@@ -409,6 +429,8 @@ def _stage_segment(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
 def _stage_translate(job: Job, cfg: dict[str, Any], report: StageReport) -> None:
     segments = segments_from_list(read_json(job.path("aligned.json")))
     tcfg = translation_config(cfg["translate"], job.state.glossaries, job.state.notes)
+    if job.state.source_type == "subtitles":
+        tcfg["source_kind"] = "subtitle"  # 原文是已有的字幕，而不是语音识别结果
     translator = create_translator(tcfg, job.state.target_lang)
     texts, counters = translate_cues(
         translator, segments, job.state.target_lang, job.state.source_lang,

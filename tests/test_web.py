@@ -1,4 +1,5 @@
 import time
+from pathlib import Path
 from threading import Event
 
 import pytest
@@ -260,3 +261,124 @@ def test_legacy_job_edit_is_rejected_without_migrating(fake_cfg, tmp_path, monke
     migrated = Job.load(workspace, job.state.id, migrate=False).state
     assert migrated.pipeline_version == PIPELINE_VERSION and migrated.format == "vtt"
     assert not job.path("translated.json").exists() and runs == [STAGES[:STAGES.index("segment")]]
+
+
+SRT = ("1\n00:00:01,000 --> 00:00:02,000\nHello there.\n\n"
+       "2\n00:00:02,500 --> 00:00:04,000\nThis continues,\n\n"
+       "3\n00:00:04,000 --> 00:00:05,000\nand ends here.\n")
+
+
+def test_transcribe_only_upload(app, sample_video):
+    client = app.test_client()
+    with open(sample_video, "rb") as f:
+        resp = client.post("/api/jobs", data={"video": (f, "a.mp4"), "target": "", "bilingual": "true"})
+    assert resp.status_code == 201, resp.get_json()
+    state = wait_idle(app, client, resp.get_json()["id"])
+    assert state["status"] == "done" and state["target_lang"] == "" and not state["bilingual"]
+    assert state["lang_label"] == "仅识别" and "translate" not in [s["key"] for s in state["steps"]]
+    segs = client.get(f"/api/jobs/{state['id']}/segments").get_json()
+    assert segs and not segs[0]["translation"]
+
+
+def test_import_subtitles_without_video(app):
+    import io
+
+    client = app.test_client()
+    resp = client.post("/api/jobs", data={"mode": "subtitles", "target": "zh", "burn": "true",
+                                          "subtitles": (io.BytesIO(SRT.encode()), "talk.en.srt")})
+    assert resp.status_code == 201, resp.get_json()
+    state = wait_idle(app, client, resp.get_json()["id"])
+    assert state["status"] == "done", state
+    assert state["source_type"] == "subtitles" and not state["has_video"] and not state["burn"]
+    assert [s["key"] for s in state["steps"]] == ["translate", "write"]
+    assert state["name"] == "talk.en.srt" and state["lang_label"] == "字幕 → 简体中文"
+    segs = client.get(f"/api/jobs/{state['id']}/segments").get_json()
+    assert [s["text"] for s in segs] == ["Hello there.", "This continues,", "and ends here."]
+    assert segs[1]["group"] == segs[2]["group"] != segs[0]["group"]  # 按句末标点并句
+    assert all(s["translation"] for s in segs)
+    page = client.get(f"/jobs/{state['id']}").get_data(as_text=True)
+    assert "<video" not in page and "只有字幕" in page and "从头重新处理" not in page
+    assert client.post(f"/api/jobs/{state['id']}/render", json={"burn": True}).status_code == 400
+    sub = client.get(state["files"]["subtitles"])
+    assert "talk.en.zh.srt" in sub.headers["Content-Disposition"]
+
+
+def test_import_subtitles_with_video_and_burn(app, sample_video):
+    import io
+
+    client = app.test_client()
+    with open(sample_video, "rb") as f:
+        resp = client.post("/api/jobs", data={"mode": "subtitles", "target": "", "burn": "true", "format": "vtt",
+                                              "subtitles": (io.BytesIO(SRT.encode()), "a.srt"),
+                                              "video": (f, "clip.mp4")})
+    state = wait_idle(app, client, resp.get_json()["id"])
+    assert state["status"] == "done", state
+    assert state["has_video"] and state["files"]["video"] and state["name"] == "clip.mp4"
+    assert [s["key"] for s in state["steps"]] == ["write", "burn"]
+    assert "Hello there." in client.get(state["files"]["subtitles"]).get_data(as_text=True)
+
+
+@pytest.mark.parametrize("data, message", [
+    ({"mode": "subtitles"}, "请选择字幕文件"),
+    ({"mode": "other"}, "任务类型"),
+    ({"mode": "subtitles", "file": ("a.ass", b"x")}, "SRT 或 VTT"),
+    ({"mode": "subtitles", "file": ("a.srt", "﻿".encode("utf-16"))}, "UTF-8"),
+    ({"mode": "subtitles", "file": ("a.srt", b"no timing")}, "没有找到"),
+    ({"mode": "subtitles", "file": ("a.srt", SRT.encode()), "target": "xx"}, "目标语言"),
+])
+def test_subtitle_upload_validation(app, data, message):
+    import io
+
+    data = dict(data)
+    if "file" in data:
+        name, raw = data.pop("file")
+        data["subtitles"] = (io.BytesIO(raw), name)
+    resp = app.test_client().post("/api/jobs", data=data)
+    assert resp.status_code == 400 and message in resp.get_json()["error"]
+
+
+def test_delete_and_restart(app, sample_video):
+    client = app.test_client()
+    with open(sample_video, "rb") as f:
+        job_id = client.post("/api/jobs", data={"video": (f, "a.mp4"), "target": "zh"}).get_json()["id"]
+    state = wait_idle(app, client, job_id)
+    assert "从头重新处理" in client.get(f"/jobs/{job_id}").get_data(as_text=True)
+
+    assert client.post(f"/api/jobs/{job_id}/restart", json={"revision": state["revision"] - 1}).status_code == 409
+    resp = client.post(f"/api/jobs/{job_id}/restart", json={"revision": state["revision"]})
+    assert resp.status_code == 200
+    state = wait_idle(app, client, job_id)
+    assert state["status"] == "done" and state["stats"]["asr_requests"] == 1  # 统计从头计算
+
+    runner = app.extensions["yakumi_runner"]
+    with runner.lock:
+        runner.active.add(job_id)
+    try:
+        assert client.delete(f"/api/jobs/{job_id}").status_code == 409
+    finally:
+        with runner.lock:
+            runner.active.discard(job_id)
+    job_dir = Path(runner.cfg["workspace"]["dir"]) / "jobs" / job_id
+    assert client.delete(f"/api/jobs/{job_id}").status_code == 200
+    assert not job_dir.exists()
+    assert client.get(f"/api/jobs/{job_id}").status_code == 404
+    assert client.delete(f"/api/jobs/{job_id}").status_code == 404
+    assert job_id not in client.get("/").get_data(as_text=True)
+
+
+def test_restart_without_source_video(app, tmp_path):
+    video = tmp_path / "gone.mp4"
+    video.write_bytes(b"x")
+    workspace = app.extensions["yakumi_runner"].cfg["workspace"]["dir"]
+    job = Job.create(workspace, video, "zh")
+    video.unlink()
+    resp = app.test_client().post(f"/api/jobs/{job.state.id}/restart", json={})
+    assert resp.status_code == 400 and "原视频" in resp.get_json()["error"]
+
+
+def test_setup_banner(fake_cfg, monkeypatch):
+    for env in ("OPENROUTER_API_KEY", "YAKUMI_TRANSLATE_API_KEY", "YAKUMI_ASR_API_KEY"):
+        monkeypatch.delenv(env, raising=False)
+    fake_cfg["translate"].update(provider="openai", api_key="")
+    page = create_app(cfg=fake_cfg).test_client().get("/").get_data(as_text=True)
+    assert "还有设置没有完成" in page and "翻译 API Key" in page

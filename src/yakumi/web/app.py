@@ -1,4 +1,4 @@
-"""网页工作台：上传视频、查看进度、校对字幕、重新生成与下载。
+"""网页工作台：上传视频或字幕、查看进度、校对字幕、重新生成与下载，以及术语表、设置和环境检查。
 
 任务在进程内的单线程池里排队执行，状态全部来自任务目录的 state.json，
 不需要数据库或消息队列。
@@ -11,10 +11,12 @@
 
 from __future__ import annotations
 
+import copy
 import ipaddress
 import json
 import logging
 import secrets
+import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -25,13 +27,14 @@ from urllib.parse import urlsplit
 
 from flask import Flask, abort, jsonify, render_template, request, send_file, url_for
 
-from .. import glossary as glossary_store, media
-from ..config import load_config
+from .. import glossary as glossary_store, media, settings as settings_store
+from ..config import ConfigError, load_config
+from ..doctor import local_checks, online_checks, setup_problems
 from ..files import write_json
 from ..models import STAGES, JobState, Segment
 from ..stats import format_stats
-from ..pipeline import Job, JobBusyError, PipelineError, run
-from ..subtitle.formats import FORMATS
+from ..pipeline import STAGE_LABELS, Job, JobBusyError, PipelineError, enabled_stages, first_stage, run
+from ..subtitle.formats import FORMATS, parse_srt
 from ..translate.base import LANG_NAMES, lang_name
 
 LANGUAGES = [
@@ -43,6 +46,7 @@ LANG_CODES = {code for code, _ in LANGUAGES}
 STATUS_LABELS = {"pending": "排队中", "running": "处理中", "done": "已完成", "error": "失败"}
 MEDIA_TYPES = {"srt": "application/x-subrip", "ass": "text/x-ssa", "vtt": "text/vtt"}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+SUBTITLE_SUFFIXES = (".srt", ".vtt")
 
 log = logging.getLogger(__name__)
 
@@ -128,23 +132,46 @@ class Runner:
                         log.exception("无法记录任务 %s 的错误状态", job.state.id)
 
 
+def _lang_label(state: JobState) -> str:
+    imported = state.source_type == "subtitles"
+    if not state.target_lang:
+        return "导入字幕" if imported else "仅识别"
+    src = "字幕" if imported else (lang_name(state.source_lang) if state.source_lang else "自动识别")
+    return f"{src} → {lang_name(state.target_lang)}"
+
+
+def _steps(state: JobState) -> list[dict[str, str]]:
+    """任务页的步骤条：每个阶段已完成、进行中、失败还是未开始。"""
+    steps = []
+    for stage in enabled_stages(state):
+        if stage == state.stage and state.status == "error":
+            status = "error"
+        elif stage in state.completed:
+            status = "done"
+        elif stage == state.stage and state.status == "running":
+            status = "active"
+        else:
+            status = "todo"
+        steps.append({"key": stage, "label": STAGE_LABELS[stage], "status": status})
+    return steps
+
+
 def _view(state: JobState) -> dict[str, Any]:
-    if state.target_lang:
-        src = lang_name(state.source_lang) if state.source_lang else "自动识别"
-        lang_label = f"{src} → {lang_name(state.target_lang)}"
-    else:
-        lang_label = "仅识别"
     data = state.to_dict()
     data.update(
-        name=Path(state.video).name,
-        lang_label=lang_label,
+        name=Path(state.video).name if state.video else "字幕",
+        lang_label=_lang_label(state),
         status_label=STATUS_LABELS.get(state.status, state.status),
         created=time.strftime("%m-%d %H:%M", time.localtime(state.created_at)),
+        has_video=bool(state.video),
+        steps=_steps(state),
     )
     return data
 
 
 def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None) -> Flask:
+    """`cfg` 由调用方直接提供时（测试、嵌入使用），网页保存的设置会写入配置文件并叠加到它上面。"""
+    injected = cfg is not None
     cfg = cfg or load_config(config_path)
     workspace = Path(cfg["workspace"]["dir"]).resolve()
     cfg["workspace"]["dir"] = str(workspace)
@@ -176,6 +203,24 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
 
     runner = Runner(cfg)
     app.extensions["yakumi_runner"] = runner
+    settings_lock = threading.Lock()
+    fixed_web = copy.deepcopy(web_cfg)
+
+    def apply_settings(result: settings_store.SaveResult) -> None:
+        """保存设置后换上新配置：之后开始处理的任务使用它，正在处理的任务不受影响。
+
+        任务目录和 [web] 在启动时确定，修改后需要重启。
+        """
+        if injected:
+            new = copy.deepcopy(runner.cfg)
+            for fid in result.changed:
+                section, key = fid.split(".", 1)
+                new[section][key] = result.cfg[section][key]
+        else:
+            new = result.cfg
+        new["workspace"]["dir"] = str(workspace)
+        new["web"] = copy.deepcopy(fixed_web)
+        runner.cfg = new
 
     # 上次进程退出时仍在运行的任务已经中断，标记出来，方便用户点“继续”。
     for state in Job.list(workspace):
@@ -231,8 +276,11 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
     @app.get("/")
     def index():
         jobs = [view(load(s.id)) for s in Job.list(workspace)[:50]]
+        sub = runner.cfg["subtitle"]
         return render_template("index.html", jobs=jobs, languages=LANGUAGES, glossaries=glossary_summaries(),
-                               default_target="zh", default_bilingual=bool(cfg["subtitle"]["bilingual"]))
+                               default_target="zh", default_bilingual=bool(sub["bilingual"]),
+                               default_format=sub["format"], formats=FORMATS,
+                               problems=setup_problems(runner.cfg))
 
     @app.get("/jobs/<job_id>")
     def job_page(job_id: str):
@@ -240,6 +288,14 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
         data = view(job)
         return render_template("job.html", job=data, job_json=to_json(data),
                                glossaries_json=to_json(glossary_summaries()))
+
+    @app.get("/settings")
+    def settings_page():
+        try:
+            data = settings_store.describe(config_path)
+        except ConfigError as exc:
+            return render_template("settings.html", settings_json="null", config_error=str(exc))
+        return render_template("settings.html", settings_json=to_json(data), config_error=None)
 
     @app.get("/glossaries")
     def glossaries_page():
@@ -300,42 +356,130 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
             abort(404)
         return jsonify(ok=True)
 
-    # ---- API -----------------------------------------------------------
+    # ---- 设置与环境检查 API -------------------------------------------
+    @app.get("/api/settings")
+    def api_settings():
+        try:
+            return jsonify(settings_store.describe(config_path))
+        except ConfigError as exc:
+            return jsonify(error=str(exc)), 500
+
+    @app.put("/api/settings")
+    def api_settings_save():
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or not isinstance(body.get("changes"), dict):
+            return jsonify(error="请求数据格式不正确"), 400
+        with settings_lock:
+            try:
+                result = settings_store.save(config_path, body["changes"])
+            except (settings_store.SettingsError, ConfigError) as exc:
+                return jsonify(error=str(exc)), 400
+            except OSError as exc:
+                return jsonify(error=f"无法写入配置文件：{exc}"), 500
+            apply_settings(result)
+            return jsonify(settings=settings_store.describe(config_path), notices=result.notices,
+                           path=str(result.path))
+
+    @app.get("/api/doctor")
+    def api_doctor():
+        return jsonify([c.to_dict() for c in local_checks(runner.cfg, config_path)])
+
+    @app.post("/api/doctor/online")
+    def api_doctor_online():
+        return jsonify([c.to_dict() for c in online_checks(runner.cfg)])
+
+    # ---- 任务 API ------------------------------------------------------
     @app.get("/api/jobs")
     def api_jobs():
         return jsonify([view(load(s.id)) for s in Job.list(workspace)[:50]])
 
+    def uploaded(name: str):
+        file = request.files.get(name)
+        return file if file and file.filename else None
+
+    def bad_request(message: str):
+        return jsonify(error=message), 400
+
     @app.post("/api/jobs")
     def api_create():
-        upload = request.files.get("video")
-        if not upload or not upload.filename:
-            return jsonify(error="请选择视频文件"), 400
+        """创建任务。mode=media：识别视频（target 为空时只识别不翻译）；
+        mode=subtitles：导入 SRT / VTT 字幕翻译或转换格式，可以附带视频用于预览和烧录。"""
+        mode = request.form.get("mode") or "media"
+        if mode not in ("media", "subtitles"):
+            return bad_request("不支持的任务类型")
+        video, subtitles = uploaded("video"), uploaded("subtitles")
+        if mode == "media" and not video:
+            return bad_request("请选择视频文件")
+        if mode == "subtitles" and not subtitles:
+            return bad_request("请选择字幕文件")
+        if mode == "media":
+            subtitles = None
         target = request.form.get("target", "zh")
-        if target not in LANG_CODES:
-            return jsonify(error="不支持的目标语言"), 400
+        if target and target not in LANG_CODES:
+            return bad_request("不支持的目标语言")
         source = request.form.get("source") or None
         if source and source not in LANG_CODES:
-            return jsonify(error="不支持的原语言"), 400
-        fmt = request.form.get("format") or cfg["subtitle"]["format"]
+            return bad_request("不支持的原语言")
+        fmt = request.form.get("format") or runner.cfg["subtitle"]["format"]
         if fmt not in FORMATS:
-            return jsonify(error="不支持的字幕格式"), 400
+            return bad_request("不支持的字幕格式")
         try:
             glossaries = check_glossaries(request.form.getlist("glossaries"))
         except ValueError as exc:
-            return jsonify(error=str(exc)), 400
+            return bad_request(str(exc))
         notes = request.form.get("notes", "")[:4000]
-        name = Path(upload.filename).name
-        suffix = Path(name).suffix.lower()[:8] or ".mp4"
-        tmp = workspace / "uploads" / f"{secrets.token_hex(8)}{suffix}"
-        upload.save(tmp)
-        job = Job.create(workspace, tmp, target, source,
-                         bilingual=request.form.get("bilingual") == "true",
-                         burn=request.form.get("burn") == "true", fmt=fmt, move_video=True,
-                         glossaries=glossaries, notes=notes)
+        segments, raw, sub_suffix = None, b"", ""
+        if subtitles:
+            sub_suffix = Path(subtitles.filename).suffix.lower()
+            if sub_suffix not in SUBTITLE_SUFFIXES:
+                return bad_request("目前只能导入 SRT 或 VTT 字幕")
+            raw = subtitles.read()
+            try:
+                segments = parse_srt(raw.decode("utf-8-sig"))
+            except UnicodeDecodeError:
+                return bad_request("字幕文件需要是 UTF-8 编码")
+            if not segments:
+                return bad_request("字幕文件里没有找到带时间轴的字幕")
+        tmp = None
+        if video:
+            suffix = Path(video.filename).suffix.lower()[:8] or ".mp4"
+            tmp = workspace / "uploads" / f"{secrets.token_hex(8)}{suffix}"
+            video.save(tmp)
+        name = Path((video or subtitles).filename).name
+        job = Job.create(workspace, tmp, target or None, source,
+                         bilingual=request.form.get("bilingual") == "true" and bool(target),
+                         burn=request.form.get("burn") == "true" and tmp is not None, fmt=fmt,
+                         move_video=tmp is not None, glossaries=glossaries, notes=notes)
         with runner.reserve(job.state.id) as reservation:
             write_json(job.path("meta.json"), {"name": name})
+            if segments is not None:
+                job.path("imported" + sub_suffix).write_bytes(raw)
+                job.import_subtitles(segments)
             runner.submit(job, reservation)
         return jsonify(id=job.state.id, url=url_for("job_page", job_id=job.state.id)), 201
+
+    @app.delete("/api/jobs/<job_id>")
+    def api_delete(job_id: str):
+        """删除任务目录（含上传的视频）。命令行任务引用的原视频在任务目录之外，不会被删除。"""
+        with runner.reserve(job_id):
+            job = load(job_id)
+            job.path("state.json").unlink()
+        shutil.rmtree(job.dir, ignore_errors=True)
+        return jsonify(ok=True)
+
+    @app.post("/api/jobs/<job_id>/restart")
+    def api_restart(job_id: str):
+        """按当前设置从头重新处理（重新识别；导入的字幕从翻译开始），会覆盖校对过的字幕。"""
+        with runner.reserve(job_id) as reservation:
+            job = load(job_id)
+            check_revision(job, edit_body())
+            if job.state.source_type != "subtitles" and not Path(job.state.video).is_file():
+                return bad_request("找不到原视频，无法重新识别")
+            job.migrate()
+            if job.state.source_type != "subtitles":
+                job.state.stats = {}  # 重新识别，费用和统计从头计算
+            runner.submit(job, reservation, from_stage=first_stage(job.state))
+        return jsonify(view(load(job_id)))
 
     @app.get("/api/jobs/<job_id>")
     def api_job(job_id: str):
@@ -371,6 +515,8 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
                 return jsonify(error="不支持的字幕格式"), 400
             if any(k in body and not isinstance(body[k], bool) for k in ("bilingual", "burn")):
                 return jsonify(error="导出选项格式不正确"), 400
+            if body.get("burn") and not st.video:
+                return jsonify(error="这个任务没有视频，不能烧录"), 400
             edited: list[Segment] = []
             if body.get("segments") is not None:
                 current = job.segments()  # 待迁移的任务没有可校对的字幕
@@ -387,7 +533,7 @@ def create_app(config_path: str | None = None, cfg: dict[str, Any] | None = None
             if edited:
                 job.save_segments(edited)
             st.format = body.get("format", st.format)
-            st.bilingual = body.get("bilingual", st.bilingual)
+            st.bilingual = body.get("bilingual", st.bilingual) and bool(st.target_lang)
             st.burn = body.get("burn", st.burn)
             # 已完成识别和翻译的任务只需从生成字幕开始；中断或失败的任务从断点续跑。
             prepared = set(STAGES[:STAGES.index("translate")]) | ({"translate"} if st.target_lang else set())

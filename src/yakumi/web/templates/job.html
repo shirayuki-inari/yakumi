@@ -18,19 +18,24 @@
       <div class="status-box" data-status-box>
         <div class="progress"><span data-progress-bar></span></div>
         <p class="progress-text" data-progress-text></p>
+        <ol class="steps" data-steps aria-label="处理步骤"></ol>
         <p class="field-hint summary" data-summary hidden></p>
       </div>
       <p class="notice error" data-error hidden></p>
 
       <div class="display-options">
+        {% if job.target_lang %}
         <div class="toggle-row">
           <span class="toggle-title" id="set-bilingual">双语字幕</span>
           <button type="button" class="toggle" role="switch" aria-checked="false" aria-labelledby="set-bilingual" data-setting="bilingual"><span></span></button>
         </div>
+        {% endif %}
+        {% if job.has_video %}
         <div class="toggle-row">
           <span class="toggle-title" id="set-burn">烧录进视频</span>
           <button type="button" class="toggle" role="switch" aria-checked="false" aria-labelledby="set-burn" data-setting="burn"><span></span></button>
         </div>
+        {% endif %}
       </div>
 
       <fieldset class="format-field">
@@ -62,7 +67,7 @@
       <div class="chip-picker" data-job-glossaries></div>
       <p class="field-hint flush" data-no-glossaries hidden>还没有术语表，可以在“管理”里新建。</p>
       <label class="context-notes">
-        <span class="field-label">补充信息（只对这个视频有效）</span>
+        <span class="field-label">补充信息（只对这个任务有效）</span>
         <textarea rows="3" maxlength="4000" data-job-notes placeholder="人名、节目背景、人物关系等"></textarea>
       </label>
       <button type="button" class="secondary-button wide" data-retranslate>
@@ -71,6 +76,20 @@
       <p class="field-hint">按当前选择的术语表和补充信息重新翻译，不会重新识别。校对过的译文会被覆盖。</p>
     </div>
     {% endif %}
+
+    <div class="control-panel actions-panel">
+      <div class="panel-heading"><h2>任务</h2></div>
+      {% if job.source_type != "subtitles" %}
+      <button type="button" class="secondary-button wide" data-restart>
+        {{ icon("rotate-ccw", 16) }}<span>从头重新处理</span>
+      </button>
+      <p class="field-hint">按 <a href="{{ url_for('settings_page') }}">当前设置</a> 重新识别、断句{% if job.target_lang %}和翻译{% endif %}，适合更换了模型或服务之后使用。校对过的字幕会被覆盖。</p>
+      {% endif %}
+      <button type="button" class="secondary-button wide danger" data-delete-job>
+        {{ icon("trash-2", 16) }}<span>删除任务</span>
+      </button>
+      <p class="field-hint">删除识别结果、字幕和网页上传的文件，无法恢复。</p>
+    </div>
   </aside>
 
   <section class="preview-panel" aria-labelledby="preview-title">
@@ -80,11 +99,18 @@
         <span class="preview-chip">{{ job.lang_label }}</span>
       </div>
     </div>
+    {% if job.has_video %}
     <div class="preview-viewport video-viewport">
       <video controls playsinline preload="metadata" data-video src="{{ url_for('job_file', job_id=job.id, name='source') }}">
         <track kind="subtitles" label="字幕" srclang="{{ job.target_lang or 'und' }}" default data-track />
       </video>
     </div>
+    {% else %}
+    <div class="empty-preview no-video">
+      {{ icon("file-text", 28) }}
+      <p>这个任务只有字幕，没有视频。可以在下面校对，然后导出。</p>
+    </div>
+    {% endif %}
 
     <div class="control-panel editor-panel">
       <div class="editor-heading">

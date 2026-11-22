@@ -57,8 +57,10 @@
 | --- | --- |
 | `cli.py` | click 命令：run / transcribe / translate / burn / serve / jobs / doctor / glossary |
 | `web/` | 网页工作台：`app.py`（路由、任务队列、跨站与 Host 检查）、`templates/`、`static/` |
+| `settings.py` | 网页可修改的配置项（分组、校验、来源），按行写回配置文件并保留注释 |
+| `doctor.py` | 环境与配置检查，命令行 `doctor` 和网页设置页共用 |
 | `pipeline.py` | 任务（`Job`）的创建、载入、迁移、续跑，以及各阶段函数 |
-| `config.py` | 默认配置、配置文件与环境变量的合并、未知配置项提示 |
+| `config.py` | 默认配置、配置文件与环境变量的合并（`build_config`）、未知配置项提示 |
 | `models.py` | `Segment`、`JobState`、阶段列表与流水线版本 |
 | `files.py` | 用户配置与缓存目录（XDG）、JSON 原子写入 |
 | `text.py` | 中日韩文字判断、按语言拼接、字幕字数上限 |

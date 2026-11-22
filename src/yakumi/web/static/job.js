@@ -13,6 +13,9 @@
   const editedBadge = $("[data-edited]");
   const cueCount = $("[data-cue-count]");
   const formatGroup = $("[data-format]");
+  const stepsList = $("[data-steps]");
+  const restartBtn = $("[data-restart]");
+  const deleteBtn = $("[data-delete-job]");
 
   const settings = { bilingual: job.bilingual, burn: job.burn, format: job.format };
   let segments = [];
@@ -55,6 +58,8 @@
     const locked = submitting || busy();
     renderBtn.disabled = locked;
     if (retranslateBtn) retranslateBtn.disabled = locked;
+    if (restartBtn) restartBtn.disabled = locked;
+    deleteBtn.disabled = locked;
     cueList.querySelectorAll("textarea").forEach((el) => (el.readOnly = locked));
   }
 
@@ -71,6 +76,7 @@
     summary.hidden = !job.summary || busy();
     errorBox.hidden = job.status !== "error" || !job.error;
     errorBox.textContent = job.error || "";
+    showSteps();
     setEditorBusy();
     renderBtn.querySelector("span").textContent = job.status === "error" ? "继续处理" : "保存并生成";
     for (const kind of ["subtitles", "video"]) {
@@ -98,8 +104,26 @@
     }
   }
 
+  // 步骤条：已完成、进行中、失败、未开始
+  const STEP_TEXT = { done: "已完成", active: "进行中", error: "失败", todo: "未开始" };
+  function showSteps() {
+    const steps = job.steps || [];
+    stepsList.hidden = steps.length < 2;
+    stepsList.replaceChildren(
+      ...steps.map((step) => {
+        const li = document.createElement("li");
+        li.className = `step ${step.status}`;
+        li.textContent = step.label;
+        li.title = `${step.label}：${STEP_TEXT[step.status] || ""}`;
+        if (step.status === "active") li.setAttribute("aria-current", "step");
+        return li;
+      }),
+    );
+  }
+
   // ---- 字幕预览 -------------------------------------------------------
   function refreshTrack() {
+    if (!video) return;
     const old = video.querySelector("track");
     if (!job.files?.preview) return;
     const track = document.createElement("track");
@@ -172,8 +196,9 @@
       time.type = "button";
       time.className = "cue-time";
       time.textContent = fmtTime(seg.start);
-      time.title = `${fmtTime(seg.start)} → ${fmtTime(seg.end)}，点击跳转`;
+      time.title = video ? `${fmtTime(seg.start)} → ${fmtTime(seg.end)}，点击跳转` : `${fmtTime(seg.start)} → ${fmtTime(seg.end)}`;
       time.addEventListener("click", () => {
+        if (!video) return;
         video.currentTime = seg.start + 0.01;
         video.play().catch(() => {});
       });
@@ -221,7 +246,7 @@
   }
 
   let activeRow = null;
-  video.addEventListener("timeupdate", () => {
+  video?.addEventListener("timeupdate", () => {
     const t = video.currentTime;
     const index = segments.findIndex((s) => t >= s.start && t < s.end);
     const row = index >= 0 ? rows[index] : null;
@@ -327,6 +352,61 @@
       }
     });
   }
+
+  // ---- 任务操作 -------------------------------------------------------
+  async function post(url, body, method = "POST") {
+    const res = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  }
+
+  restartBtn?.addEventListener("click", async () => {
+    if (submitting || busy()) return;
+    const message = dirty
+      ? "有未保存的修改，重新处理会丢弃它们，并覆盖校对过的字幕。确定从头重新处理吗？"
+      : "会按当前设置重新识别、断句和翻译，覆盖校对过的字幕，并再次产生费用。确定继续吗？";
+    if (!window.confirm(message)) return;
+    submitting = true;
+    setEditorBusy();
+    try {
+      job = await post(`/api/jobs/${job.id}/restart`, { revision: job.revision });
+      job.busy = true;
+      setDirty(false);
+      loadedFor = null;
+      showState();
+      poll();
+    } catch (err) {
+      errorBox.textContent = `重新处理失败：${err.message}`;
+      errorBox.hidden = false;
+    } finally {
+      submitting = false;
+      setEditorBusy();
+    }
+  });
+
+  deleteBtn.addEventListener("click", async () => {
+    if (submitting || busy()) return;
+    if (!window.confirm(`删除任务“${job.name}”？识别结果、字幕和网页上传的文件都会被删除，无法恢复。`)) return;
+    submitting = true;
+    setEditorBusy();
+    try {
+      const res = await fetch(`/api/jobs/${job.id}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      dirty = false;
+      window.location.href = "/";
+    } catch (err) {
+      errorBox.textContent = `删除失败：${err.message}`;
+      errorBox.hidden = false;
+      submitting = false;
+      setEditorBusy();
+    }
+  });
 
   window.addEventListener("beforeunload", (event) => {
     if (dirty) event.preventDefault();

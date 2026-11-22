@@ -226,12 +226,21 @@ def load_config(
     warn: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """读取配置。`warn` 用来提示配置文件里不认识的键。格式错误时抛出 ConfigError。"""
-    cfg = copy.deepcopy(DEFAULTS)
+    layers = []
     for candidate in config_files(path):
         data = read_config_file(candidate)
         if warn:
             for key in unknown_keys(data):
                 warn(f"配置文件 {candidate} 里有不认识的配置项 {key}，已忽略（是否拼写有误？）")
+        layers.append(data)
+    return build_config(layers, overrides, use_env)
+
+
+def build_config(layers: list[dict[str, Any]], overrides: dict[str, Any] | None = None,
+                 use_env: bool = True) -> dict[str, Any]:
+    """按优先级合并：默认值 → 各配置文件的内容（按顺序）→ 环境变量 → 命令行参数。"""
+    cfg = copy.deepcopy(DEFAULTS)
+    for data in layers:
         _merge_config(cfg, data)
 
     if use_env:

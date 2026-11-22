@@ -1,14 +1,39 @@
 {% extends "base.html" %}
 {% block content %}
+{% if problems %}
+<div class="setup-banner" role="alert">
+  {{ icon("triangle-alert", 18) }}
+  <div class="setup-text">
+    <strong>还有设置没有完成，新任务会失败</strong>
+    <ul>
+      {% for p in problems %}<li>{{ p.title }}{% if p.hint %}：{{ p.hint }}{% endif %}</li>{% endfor %}
+    </ul>
+  </div>
+  <a class="secondary-button" href="{{ url_for('settings_page') }}">{{ icon("settings", 16) }}<span>前往设置</span></a>
+</div>
+{% endif %}
+
 <section class="source-panel" aria-labelledby="upload-title">
-  <h1 id="upload-title" class="visually-hidden">上传视频</h1>
-  <form class="source-form" data-upload-form>
+  <h1 id="upload-title" class="visually-hidden">新建任务</h1>
+  <form class="source-form" data-upload-form data-mode="media">
+    <div class="segmented mode-switch" role="radiogroup" aria-label="任务类型" data-mode-switch>
+      <button type="button" role="radio" class="selected" aria-checked="true" data-value="media">{{ icon("film", 15) }}<span>识别视频</span></button>
+      <button type="button" role="radio" aria-checked="false" data-value="subtitles">{{ icon("file-text", 15) }}<span>已有字幕</span></button>
+    </div>
+
     <div class="source-link-field">
-      <span class="field-label">视频文件</span>
-      <label class="url-field file-field">
+      <span class="field-label" data-only="media">视频文件</span>
+      <span class="field-label" data-only="subtitles" hidden>字幕文件</span>
+      <label class="url-field file-field" data-only="media">
         {{ icon("film", 16) }}
-        <input type="file" name="video" accept="video/*,audio/*,.mkv" required />
-        <span class="file-name" data-file-name>选择或拖入视频</span>
+        <input type="file" name="video" accept="video/*,audio/*,.mkv" data-file-input />
+        <span class="file-name" data-placeholder="选择或拖入视频">选择或拖入视频</span>
+        <span class="file-pick">浏览</span>
+      </label>
+      <label class="url-field file-field" data-only="subtitles" hidden>
+        {{ icon("file-text", 16) }}
+        <input type="file" name="subtitles" accept=".srt,.vtt" data-file-input disabled />
+        <span class="file-name" data-placeholder="选择或拖入 SRT / VTT 字幕">选择或拖入 SRT / VTT 字幕</span>
         <span class="file-pick">浏览</span>
       </label>
     </div>
@@ -16,10 +41,12 @@
       <label class="field-label" for="target">翻译成</label>
       <div class="select-wrap">
         {{ icon("languages", 16) }}
-        <select id="target" name="target">
+        <select id="target" name="target" data-target>
           {% for code, name in languages %}
           <option value="{{ code }}"{% if code == default_target %} selected{% endif %}>{{ name }}</option>
           {% endfor %}
+          <option disabled>──────────</option>
+          <option value="" data-none-label>不翻译，只识别</option>
         </select>
         {{ icon("chevron-down", 16) }}
       </div>
@@ -27,30 +54,47 @@
     <div>
       <span class="field-label" aria-hidden="true">&nbsp;</span>
       <button type="submit" class="primary generate-button" data-submit>
-        {{ icon("upload", 16) }}<span>开始翻译</span>
+        {{ icon("upload", 16) }}<span data-submit-label>开始翻译</span>
       </button>
     </div>
+
+    <div class="optional-video" data-only="subtitles" hidden>
+      <label class="url-field file-field compact">
+        {{ icon("film", 16) }}
+        <input type="file" name="video" accept="video/*,audio/*,.mkv" data-file-input disabled />
+        <span class="file-name" data-placeholder="附带视频（可选）：用于预览和烧录">附带视频（可选）：用于预览和烧录</span>
+        <span class="file-pick">浏览</span>
+      </label>
+    </div>
+
     <div class="source-meta">
-      <span class="platform-pill" data-file-meta>支持 MP4、MOV、MKV、WebM 等常见格式</span>
+      <span class="platform-pill" data-file-meta data-only="media">支持 MP4、MOV、MKV、WebM 等常见格式，也可以是音频</span>
+      <span class="platform-pill" data-only="subtitles" hidden>UTF-8 编码的 SRT 或 VTT，翻译时按句末标点把相邻字幕并成句子</span>
       <div class="upload-options">
         <label class="inline-select">
           <span>原语言</span>
-          <select name="source">
+          <select name="source" data-source>
             <option value="">自动识别</option>
             {% for code, name in languages %}<option value="{{ code }}">{{ name }}</option>{% endfor %}
           </select>
         </label>
-        <span class="inline-toggle">
+        <label class="inline-select">
+          <span>格式</span>
+          <select name="format">
+            {% for f in formats %}<option value="{{ f }}"{% if f == default_format %} selected{% endif %}>{{ f|upper }}</option>{% endfor %}
+          </select>
+        </label>
+        <span class="inline-toggle" data-toggle-wrap="bilingual">
           <span id="opt-bilingual">双语</span>
           <button type="button" class="toggle{% if default_bilingual %} on{% endif %}" role="switch" aria-checked="{{ 'true' if default_bilingual else 'false' }}" aria-labelledby="opt-bilingual" data-toggle="bilingual"><span></span></button>
         </span>
-        <span class="inline-toggle">
+        <span class="inline-toggle" data-toggle-wrap="burn">
           <span id="opt-burn">烧录</span>
           <button type="button" class="toggle" role="switch" aria-checked="false" aria-labelledby="opt-burn" data-toggle="burn"><span></span></button>
         </span>
       </div>
     </div>
-    <details class="context-options">
+    <details class="context-options" data-context>
       <summary>{{ icon("book-open", 14) }}<span>术语表与补充信息</span><span class="context-count" data-context-count></span></summary>
       <div class="context-body">
         <div>
@@ -66,7 +110,7 @@
           {% endif %}
         </div>
         <label class="context-notes">
-          <span class="field-label">补充信息（只对这个视频有效）</span>
+          <span class="field-label">补充信息（只对这个任务有效）</span>
           <textarea name="notes" rows="3" maxlength="4000" placeholder="例如：主播称呼粉丝为“助手くん”；这期是第一次 ASMR 直播。"></textarea>
         </label>
       </div>

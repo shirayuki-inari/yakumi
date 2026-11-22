@@ -39,3 +39,10 @@ def test_vtt_header():
 def test_ass_escapes_and_bilingual_style():
     out = to_ass([Segment(0, 1, "a{b}", "译")], bilingual=True)
     assert "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,译\\N{\\rOriginal}a\\{b\\}" in out
+
+
+def test_parse_vtt_without_hours():
+    from yakumi.subtitle.formats import parse_srt
+
+    segs = parse_srt("WEBVTT\n\n01:02.500 --> 01:04.000\nshort\n\n00:00:05.000 --> 00:00:06.000\nfull\n")
+    assert [(s.start, s.end, s.text) for s in segs] == [(62.5, 64.0, "short"), (5.0, 6.0, "full")]

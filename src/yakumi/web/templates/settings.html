@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}设置 · Yakumi{% endblock %}
+{% block content %}
+<div class="job-header">
+  <a class="text-button back-link" href="{{ url_for('index') }}">{{ icon("arrow-left", 14) }}<span>全部任务</span></a>
+  <div class="job-title-row"><h1 class="job-title">设置</h1></div>
+  <p class="job-sub">与命令行共用同一份配置。保存后对之后开始处理的任务生效，正在处理的任务不受影响。</p>
+</div>
+
+{% if config_error %}
+<p class="notice error">配置文件有错误，请先在文件里修正后刷新页面：{{ config_error }}</p>
+{% else %}
+<div class="settings-layout">
+  <nav class="settings-nav" aria-label="设置分组" data-settings-nav>
+    <a href="#check">{{ icon("activity", 16) }}<span>环境检查</span></a>
+  </nav>
+
+  <div class="settings-main">
+    <section class="control-panel settings-group" id="check" aria-labelledby="check-title">
+      <div class="panel-heading">
+        <h2 id="check-title">环境检查</h2>
+        <div class="heading-actions">
+          <button type="button" class="text-button" data-check-local>{{ icon("refresh-cw", 14) }}<span>重新检查</span></button>
+          <button type="button" class="text-button" data-check-online>{{ icon("globe", 14) }}<span>测试连接</span></button>
+        </div>
+      </div>
+      <p class="field-hint flush group-desc">检查 ffmpeg、语音检测和各项服务的密钥。“测试连接”会实际访问识别和翻译接口，验证密钥是否有效（不产生费用）。</p>
+      <ul class="check-list" data-check-list></ul>
+      <ul class="check-list" data-online-list hidden></ul>
+    </section>
+
+    <div data-groups></div>
+
+    <section class="control-panel settings-group" id="file" aria-labelledby="file-title">
+      <div class="panel-heading"><h2 id="file-title">配置文件</h2></div>
+      <dl class="file-info" data-file-info></dl>
+      <p class="field-hint">下面这些项会执行本地程序、读取服务器上的路径，或者关系到工作台自身的安全，只能在配置文件里修改。修改任务目录和 [web] 后需要重启 <code>yakumi serve</code>。</p>
+      <dl class="readonly-list" data-readonly></dl>
+    </section>
+  </div>
+</div>
+
+<div class="save-bar" data-save-bar hidden>
+  <span class="save-text" data-save-text></span>
+  <div class="save-actions">
+    <button type="button" class="secondary-button" data-discard>放弃修改</button>
+    <button type="button" class="primary" data-save-settings>{{ icon("save", 16) }}<span>保存</span></button>
+  </div>
+</div>
+
+<template data-icon="ok">{{ icon("circle-check", 16) }}</template>
+<template data-icon="warn">{{ icon("triangle-alert", 16) }}</template>
+<template data-icon="fail">{{ icon("circle-x", 16) }}</template>
+<template data-icon="info">{{ icon("info", 16) }}</template>
+<template data-icon="chevron">{{ icon("chevron-down", 16) }}</template>
+<template data-icon="key">{{ icon("key", 14) }}</template>
+<template data-icon="mic">{{ icon("mic", 16) }}</template>
+<template data-icon="languages">{{ icon("languages", 16) }}</template>
+<template data-icon="scissors">{{ icon("scissors", 16) }}</template>
+<template data-icon="captions">{{ icon("captions", 16) }}</template>
+<template data-icon="sliders">{{ icon("sliders", 16) }}</template>
+<template data-icon="file">{{ icon("file-text", 16) }}</template>
+<script type="application/json" id="settings-data">{{ settings_json|safe }}</script>
+{% endif %}
+{% endblock %}
+{% block scripts %}{% if not config_error %}<script src="{{ url_for('static', filename='settings.js') }}"></script>{% endif %}{% endblock %}
